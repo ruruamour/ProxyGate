@@ -1,13 +1,13 @@
 # GoProxy
 
-> **自托管代理网关** — 聚合公开代理与订阅节点，统一验证入池，并稳定输出 HTTP 和 SOCKS5 代理服务
+> **自托管代理网关** — 聚合公开代理与订阅节点，统一验证入池，通过统一 HTTP/SOCKS5 网关输出并支持会话粘性
 
 [![Upstream Docker Hub](https://img.shields.io/docker/v/isboyjc/goproxy?label=Upstream%20Docker%20Hub&logo=docker)](https://hub.docker.com/r/isboyjc/goproxy)
 [![Upstream GHCR](https://img.shields.io/badge/GHCR-upstream-blue?logo=github)](https://github.com/isboyjc/GoProxy/pkgs/container/goproxy)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go)](https://go.dev/)
 
-GoProxy 是一个基于 Go 的自托管代理网关，聚合公开代理与 Clash/V2ray 等订阅节点，通过出口 IP、地理位置、延迟和 HTTPS CONNECT 可用性验证后统一入池，对外提供 HTTP 和 SOCKS5 两种代理入口。订阅节点会先以禁用状态入库，验证通过后再激活，失败节点保留并定时探测恢复。
+GoProxy 是一个基于 Go 的自托管代理网关，聚合公开代理与 Clash/V2ray 等订阅节点，通过出口 IP、地理位置、延迟和 HTTPS CONNECT 可用性验证后统一入池，再以统一的 HTTP/SOCKS5 代理入口对外输出，并支持基于 `sid` / `t` 的会话粘性与地域筛选。订阅节点会先以禁用状态入库，验证通过后再激活，失败节点保留并定时探测恢复。
 
 **原项目**：[github.com/isboyjc/GoProxy](https://github.com/isboyjc/GoProxy)
 
