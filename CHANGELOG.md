@@ -190,7 +190,7 @@
 
 ## 相关链接
 
-- [项目仓库](https://github.com/isboyjc/GoProxy)
+- [项目仓库](https://github.com/ruruamour/GoProxy)
 - [Docker Hub](https://hub.docker.com/r/isboyjc/goproxy)
 - [GitHub Container Registry](https://github.com/isboyjc/GoProxy/pkgs/container/goproxy)
-- [问题反馈](https://github.com/isboyjc/GoProxy/issues)
+- [问题反馈](https://github.com/ruruamour/GoProxy/issues)

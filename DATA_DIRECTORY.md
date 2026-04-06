@@ -2,7 +2,7 @@
 
 GoProxy 的所有运行时数据和配置存储在数据目录中。
 
-**默认配置**（`docker-compose.yml`）：使用 Docker Named Volume `goproxy-data`，由 Docker 自动管理，数据持久化且独立于容器生命周期。
+**默认配置**（`docker-compose.yml`）：使用 Docker Named Volume `goproxy-data`，由 Docker 自动管理，数据持久化且独立于容器生命周期。实际 Docker 卷名可能带 Compose 项目前缀。
 
 ## 📁 目录内容
 
@@ -55,11 +55,11 @@ GoProxy 的所有运行时数据和配置存储在数据目录中。
 
 ### Dokploy / 生产部署（Named Volume）
 
-**卷名称**：`goproxy-data`
+**Compose 声明名**：`goproxy-data`
 
-**实际位置**（Linux）：
+**实际位置**（Linux，示例）：
 ```bash
-/var/lib/docker/volumes/goproxy-data/_data/
+/var/lib/docker/volumes/<project>_goproxy-data/_data/
 ```
 
 **查看数据**：
@@ -159,14 +159,19 @@ docker run -v "$(pwd)/data:/app/data" ...
 ### Docker Compose 配置
 
 ```yaml
+services:
+  goproxy:
+    volumes:
+      - goproxy-data:/app/data
+
 volumes:
-  - ${DATA_DIR:-./data}:/app/data
+  goproxy-data:
 ```
 
 **说明**：
-- 宿主机目录：`./data`（docker-compose.yml 所在目录下）
+- 使用 Docker Named Volume，不直接绑定宿主机 `./data`
 - 容器内路径：`/app/data`
-- 首次启动会自动创建 `data/` 目录
+- 实际卷名可能带 Compose 项目前缀，可通过 `docker volume ls` 查看
 
 ### Docker Run 配置
 
@@ -244,12 +249,9 @@ rm -rf data/
 
 ```bash
 # 停止并删除容器
-docker compose down
+docker compose down -v
 
-# 删除数据卷
-rm -rf data/
-
-# 重新启动（全新环境）
+# 重新启动（全新环境，会自动重建数据卷）
 docker compose up -d
 ```
 

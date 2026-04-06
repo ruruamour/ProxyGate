@@ -76,12 +76,24 @@ func (s *Server) Start() error {
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	opts := RequestOptions{}
+	cfg := s.currentConfig()
 
 	// 认证检查（如果启用）
-	if s.currentConfig().ProxyAuthEnabled {
-		var ok bool
-		opts, ok = s.parseAuth(r)
-		if !ok {
+	if cfg.ProxyAuthEnabled {
+		authHeaderPresent := strings.TrimSpace(r.Header.Get("Proxy-Authorization")) != ""
+		switch {
+		case authHeaderPresent:
+			var ok bool
+			opts, ok = s.parseAuth(r)
+			if !ok {
+				w.Header().Set("Proxy-Authenticate", `Basic realm="GoProxy"`)
+				http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
+				return
+			}
+		case canBypassProxyAuth(cfg, r.RemoteAddr):
+			// Local loopback clients can skip auth so browsers can use SOCKS/HTTP
+			// without embedding credentials. Remote clients still require auth.
+		default:
 			w.Header().Set("Proxy-Authenticate", `Basic realm="GoProxy"`)
 			http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
 			return
@@ -260,8 +272,10 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, opts Request
 		s.storage.RecordProxyUse(p.Address, true)
 		if resp.StatusCode == 429 {
 			log.Printf("[proxy] ⚠️  429 %s %s via %s (protocol=%s)", r.Method, target, p.Address, p.Protocol)
-		} else {
+		} else if resp.StatusCode >= 400 {
 			log.Printf("[proxy] %s %s via %s -> %d", r.Method, target, p.Address, resp.StatusCode)
+		} else if seq, ok := sampledSuccessLog(&httpSuccessLogSeq); ok {
+			log.Printf("[proxy] sampled_success total=%d %s %s via %s -> %d", seq, r.Method, target, p.Address, resp.StatusCode)
 		}
 		return
 	}
@@ -313,7 +327,9 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request, opts Reque
 		}
 
 		fmt.Fprintf(clientConn, "HTTP/1.1 200 Connection Established\r\n\r\n")
-		log.Printf("[tunnel] %s via %s established", r.Host, p.Address)
+		if seq, ok := sampledSuccessLog(&tunnelEstablishedSeq); ok {
+			log.Printf("[tunnel] sampled_established total=%d %s via %s", seq, r.Host, p.Address)
+		}
 
 		go func(proxyAddress string, upstreamConn, downstreamConn net.Conn, sessionKey string) {
 			outcome := relayTunnel(downstreamConn, upstreamConn)

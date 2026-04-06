@@ -129,7 +129,9 @@ func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 		_ = clientConn.SetDeadline(time.Time{})
 		_ = upstreamConn.SetDeadline(time.Time{})
 
-		log.Printf("[socks5] %s via %s established", target, p.Address)
+		if seq, ok := sampledSuccessLog(&socks5EstablishedSeq); ok {
+			log.Printf("[socks5] sampled_established total=%d %s via %s", seq, target, p.Address)
+		}
 		outcome := relayTunnel(clientConn, upstreamConn)
 		if tunnelLooksHealthy(outcome) {
 			s.storage.RecordProxyUse(p.Address, true)
@@ -201,24 +203,26 @@ func (s *SOCKS5Server) socks5Handshake(conn net.Conn) (RequestOptions, error) {
 	}
 
 	// 检查是否需要认证
-	needAuth := s.currentConfig().ProxyAuthEnabled
+	cfg := s.currentConfig()
+	needAuth := cfg.ProxyAuthEnabled
+	localBypass := canBypassProxyAuth(cfg, conn.RemoteAddr().String())
+	allowNoAuth := !needAuth || localBypass
 	methods := buf[2 : 2+nmethods]
 
 	// 选择认证方式
 	var selectedMethod byte = 0xFF // No acceptable methods
-	if needAuth {
-		// 需要用户名/密码认证 (0x02)
-		for _, method := range methods {
-			if method == 0x02 {
-				selectedMethod = 0x02
-				break
-			}
-		}
-	} else {
-		// 无需认证 (0x00)
+	if allowNoAuth {
 		for _, method := range methods {
 			if method == 0x00 {
 				selectedMethod = 0x00
+				break
+			}
+		}
+	}
+	if selectedMethod == 0xFF {
+		for _, method := range methods {
+			if method == 0x02 && (needAuth || localBypass) {
+				selectedMethod = 0x02
 				break
 			}
 		}

@@ -6,6 +6,8 @@ import (
 	"log"
 	"math/rand"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -60,8 +62,29 @@ type SourceStatus struct {
 }
 
 type Storage struct {
-	db *sql.DB
+	db                *sql.DB
+	selectionSnapshot atomic.Pointer[proxySelectionSnapshot]
+	snapshotMu        sync.Mutex
+	pendingUseMu      sync.Mutex
+	pendingSuccessUse map[string]int
+	usageStopCh       chan struct{}
+	usageWG           sync.WaitGroup
 }
+
+type proxySelectionSnapshot struct {
+	all          []Proxy
+	free         []Proxy
+	custom       []Proxy
+	httpOnly     []Proxy
+	socks5Only   []Proxy
+	freeHTTP     []Proxy
+	freeSOCKS5   []Proxy
+	customHTTP   []Proxy
+	customSOCKS5 []Proxy
+	byAddress    map[string]Proxy
+}
+
+const successUseFlushInterval = 250 * time.Millisecond
 
 func sqliteDSN(path string) string {
 	if strings.Contains(path, "?") {
@@ -80,10 +103,15 @@ func New(dbPath string) (*Storage, error) {
 	db.SetMaxOpenConns(4)
 	db.SetMaxIdleConns(4)
 
-	s := &Storage{db: db}
+	s := &Storage{
+		db:                db,
+		pendingSuccessUse: make(map[string]int),
+		usageStopCh:       make(chan struct{}),
+	}
 	if err := s.initSchema(); err != nil {
 		return nil, err
 	}
+	s.startUsageFlusher()
 	return s, nil
 }
 
@@ -267,7 +295,9 @@ func (s *Storage) AddProxy(address, protocol string) error {
 	affected, _ := result.RowsAffected()
 	if affected == 0 {
 		log.Printf("[storage] AddProxy %s ignored (already exists or constraint)", address)
+		return nil
 	}
+	s.invalidateSelectionSnapshot()
 	return nil
 }
 
@@ -289,7 +319,13 @@ func (s *Storage) AddProxies(proxies []Proxy) error {
 			log.Printf("insert proxy %s error: %v", p.Address, err)
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if len(proxies) > 0 {
+		s.invalidateSelectionSnapshot()
+	}
+	return nil
 }
 
 // GetRandom 随机取一个可用代理（优先选择质量高的）
@@ -351,6 +387,240 @@ func scanProxy(rows *sql.Rows) (*Proxy, error) {
 	return p, nil
 }
 
+func (s *Storage) invalidateSelectionSnapshot() {
+	s.selectionSnapshot.Store(nil)
+}
+
+func (s *Storage) startUsageFlusher() {
+	s.usageWG.Add(1)
+	go func() {
+		defer s.usageWG.Done()
+		ticker := time.NewTicker(successUseFlushInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				_ = s.flushPendingSuccessUse()
+			case <-s.usageStopCh:
+				_ = s.flushPendingSuccessUse()
+				return
+			}
+		}
+	}()
+}
+
+func (s *Storage) flushPendingSuccessUse() error {
+	s.pendingUseMu.Lock()
+	if len(s.pendingSuccessUse) == 0 {
+		s.pendingUseMu.Unlock()
+		return nil
+	}
+	batch := s.pendingSuccessUse
+	s.pendingSuccessUse = make(map[string]int, len(batch))
+	s.pendingUseMu.Unlock()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		s.restorePendingSuccessUse(batch)
+		return err
+	}
+
+	stmt, err := tx.Prepare(
+		`UPDATE proxies
+		 SET use_count = use_count + ?, success_count = success_count + ?, fail_count = 0,
+		     last_used = CURRENT_TIMESTAMP
+		 WHERE address = ?`,
+	)
+	if err != nil {
+		_ = tx.Rollback()
+		s.restorePendingSuccessUse(batch)
+		return err
+	}
+	defer stmt.Close()
+
+	for address, count := range batch {
+		if _, err := stmt.Exec(count, count, address); err != nil {
+			_ = tx.Rollback()
+			s.restorePendingSuccessUse(batch)
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		s.restorePendingSuccessUse(batch)
+		return err
+	}
+	return nil
+}
+
+func (s *Storage) restorePendingSuccessUse(batch map[string]int) {
+	if len(batch) == 0 {
+		return
+	}
+	s.pendingUseMu.Lock()
+	defer s.pendingUseMu.Unlock()
+
+	if s.pendingSuccessUse == nil {
+		s.pendingSuccessUse = make(map[string]int, len(batch))
+	}
+	for address, count := range batch {
+		s.pendingSuccessUse[address] += count
+	}
+}
+
+func (s *Storage) getSelectionSnapshot() (*proxySelectionSnapshot, error) {
+	if snap := s.selectionSnapshot.Load(); snap != nil {
+		return snap, nil
+	}
+
+	s.snapshotMu.Lock()
+	defer s.snapshotMu.Unlock()
+
+	if snap := s.selectionSnapshot.Load(); snap != nil {
+		return snap, nil
+	}
+
+	rows, err := s.db.Query(
+		`SELECT ` + proxyColumns + `
+		 FROM proxies
+		 WHERE status IN ('active', 'degraded') AND fail_count < 3
+		 ORDER BY latency ASC, id ASC`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var proxies []Proxy
+	for rows.Next() {
+		p, err := scanProxy(rows)
+		if err != nil {
+			return nil, err
+		}
+		proxies = append(proxies, *p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	snap := buildSelectionSnapshot(proxies)
+	s.selectionSnapshot.Store(snap)
+	return snap, nil
+}
+
+func buildSelectionSnapshot(proxies []Proxy) *proxySelectionSnapshot {
+	snap := &proxySelectionSnapshot{
+		all:          make([]Proxy, 0, len(proxies)),
+		free:         make([]Proxy, 0, len(proxies)),
+		custom:       make([]Proxy, 0, len(proxies)),
+		httpOnly:     make([]Proxy, 0, len(proxies)),
+		socks5Only:   make([]Proxy, 0, len(proxies)),
+		freeHTTP:     make([]Proxy, 0, len(proxies)),
+		freeSOCKS5:   make([]Proxy, 0, len(proxies)),
+		customHTTP:   make([]Proxy, 0, len(proxies)),
+		customSOCKS5: make([]Proxy, 0, len(proxies)),
+		byAddress:    make(map[string]Proxy, len(proxies)),
+	}
+
+	for _, p := range proxies {
+		snap.all = append(snap.all, p)
+		snap.byAddress[p.Address] = p
+
+		switch p.Source {
+		case "custom":
+			snap.custom = append(snap.custom, p)
+			if p.Protocol == "http" {
+				snap.customHTTP = append(snap.customHTTP, p)
+			} else if p.Protocol == "socks5" {
+				snap.customSOCKS5 = append(snap.customSOCKS5, p)
+			}
+		default:
+			snap.free = append(snap.free, p)
+			if p.Protocol == "http" {
+				snap.freeHTTP = append(snap.freeHTTP, p)
+			} else if p.Protocol == "socks5" {
+				snap.freeSOCKS5 = append(snap.freeSOCKS5, p)
+			}
+		}
+
+		if p.Protocol == "http" {
+			snap.httpOnly = append(snap.httpOnly, p)
+		} else if p.Protocol == "socks5" {
+			snap.socks5Only = append(snap.socks5Only, p)
+		}
+	}
+
+	return snap
+}
+
+func (s *proxySelectionSnapshot) selectList(sourceFilter, protocol string) []Proxy {
+	switch sourceFilter {
+	case "free":
+		switch protocol {
+		case "http":
+			return s.freeHTTP
+		case "socks5":
+			return s.freeSOCKS5
+		default:
+			return s.free
+		}
+	case "custom":
+		switch protocol {
+		case "http":
+			return s.customHTTP
+		case "socks5":
+			return s.customSOCKS5
+		default:
+			return s.custom
+		}
+	default:
+		switch protocol {
+		case "http":
+			return s.httpOnly
+		case "socks5":
+			return s.socks5Only
+		default:
+			return s.all
+		}
+	}
+}
+
+func buildExcludeSet(excludes []string) map[string]struct{} {
+	if len(excludes) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(excludes))
+	for _, address := range excludes {
+		set[address] = struct{}{}
+	}
+	return set
+}
+
+func matchesSnapshotFilters(p Proxy, region, state string, excludes map[string]struct{}) bool {
+	if len(excludes) > 0 {
+		if _, found := excludes[p.Address]; found {
+			return false
+		}
+	}
+
+	if region != "" {
+		fields := strings.Fields(strings.ToUpper(p.ExitLocation))
+		if len(fields) == 0 || fields[0] != region {
+			return false
+		}
+	}
+
+	if state != "" {
+		location := strings.ToUpper(strings.TrimSpace(p.ExitLocation))
+		if location == "" || !strings.Contains(location, state) {
+			return false
+		}
+	}
+
+	return true
+}
+
 // GetAll 获取所有可用代理
 func (s *Storage) GetAll() ([]Proxy, error) {
 	return s.GetAllFiltered("")
@@ -388,20 +658,13 @@ func (s *Storage) GetAllFiltered(sourceFilter string) ([]Proxy, error) {
 
 // GetByAddress 按地址获取可用代理
 func (s *Storage) GetByAddress(address string) (*Proxy, error) {
-	rows, err := s.db.Query(
-		`SELECT `+proxyColumns+`
-		 FROM proxies
-		 WHERE address = ? AND status IN ('active', 'degraded') AND fail_count < 3
-		 LIMIT 1`,
-		address,
-	)
+	snap, err := s.getSelectionSnapshot()
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	if rows.Next() {
-		return scanProxy(rows)
+	if proxy, ok := snap.byAddress[address]; ok {
+		result := proxy
+		return &result, nil
 	}
 	return nil, fmt.Errorf("proxy not found: %s", address)
 }
@@ -415,73 +678,39 @@ func (s *Storage) SelectProxy(
 	excludes []string,
 	lowestLatency bool,
 ) (*Proxy, error) {
-	baseQuery := `
-		 FROM proxies
-		 WHERE status IN ('active', 'degraded') AND fail_count < 3`
-	args := make([]interface{}, 0, 8+len(excludes))
-
-	if sourceFilter != "" {
-		baseQuery += ` AND source = ?`
-		args = append(args, sourceFilter)
-	}
-	if protocol != "" {
-		baseQuery += ` AND protocol = ?`
-		args = append(args, protocol)
-	}
-	if region != "" {
-		baseQuery += ` AND (UPPER(exit_location) = ? OR UPPER(exit_location) LIKE ?)`
-		args = append(args, region, region+" %")
-	}
-	if state != "" {
-		baseQuery += ` AND UPPER(exit_location) LIKE ?`
-		args = append(args, "%"+state+"%")
-	}
-	if len(excludes) > 0 {
-		placeholders := make([]string, len(excludes))
-		for i, address := range excludes {
-			placeholders[i] = "?"
-			args = append(args, address)
-		}
-		baseQuery += ` AND address NOT IN (` + strings.Join(placeholders, ",") + `)`
-	}
-
-	if lowestLatency {
-		query := `SELECT ` + proxyColumns + baseQuery + ` ORDER BY latency ASC, fail_count ASC LIMIT 1`
-
-		rows, err := s.db.Query(query, args...)
-		if err != nil {
-			return nil, err
-		}
-		defer rows.Close()
-
-		if rows.Next() {
-			return scanProxy(rows)
-		}
-		return nil, fmt.Errorf("no available proxy")
-	}
-
-	// 随机模式避免在热路径上使用 ORDER BY RANDOM()，减少 SQLite 全表随机排序开销。
-	countQuery := `SELECT COUNT(*)` + baseQuery
-	var count int
-	if err := s.db.QueryRow(countQuery, args...).Scan(&count); err != nil {
-		return nil, err
-	}
-	if count == 0 {
-		return nil, fmt.Errorf("no available proxy")
-	}
-
-	offset := rand.Intn(count)
-	query := `SELECT ` + proxyColumns + baseQuery + ` ORDER BY id ASC LIMIT 1 OFFSET ?`
-	args = append(args, offset)
-
-	rows, err := s.db.Query(query, args...)
+	snap, err := s.getSelectionSnapshot()
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
-	if rows.Next() {
-		return scanProxy(rows)
+	candidates := snap.selectList(sourceFilter, protocol)
+	excludeSet := buildExcludeSet(excludes)
+
+	if lowestLatency {
+		for i := range candidates {
+			if !matchesSnapshotFilters(candidates[i], region, state, excludeSet) {
+				continue
+			}
+			proxy := candidates[i]
+			return &proxy, nil
+		}
+		return nil, fmt.Errorf("no available proxy")
+	}
+
+	var selected *Proxy
+	seen := 0
+	for i := range candidates {
+		if !matchesSnapshotFilters(candidates[i], region, state, excludeSet) {
+			continue
+		}
+		seen++
+		if rand.Intn(seen) == 0 {
+			proxy := candidates[i]
+			selected = &proxy
+		}
+	}
+	if selected != nil {
+		return selected, nil
 	}
 	return nil, fmt.Errorf("no available proxy")
 }
@@ -609,7 +838,13 @@ func (s *Storage) GetLowestLatencyByProtocolExcludeFiltered(protocol string, exc
 
 // Delete 立即删除指定代理
 func (s *Storage) Delete(address string) error {
-	_, err := s.db.Exec(`DELETE FROM proxies WHERE address = ?`, address)
+	result, err := s.db.Exec(`DELETE FROM proxies WHERE address = ?`, address)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected > 0 {
+		s.invalidateSelectionSnapshot()
+	}
 	return err
 }
 
@@ -619,6 +854,9 @@ func (s *Storage) IncrFail(address string) error {
 		`UPDATE proxies SET fail_count = fail_count + 1, last_check = CURRENT_TIMESTAMP WHERE address = ?`,
 		address,
 	)
+	if err == nil {
+		s.invalidateSelectionSnapshot()
+	}
 	return err
 }
 
@@ -628,6 +866,9 @@ func (s *Storage) ResetFail(address string) error {
 		`UPDATE proxies SET fail_count = 0, last_check = CURRENT_TIMESTAMP WHERE address = ?`,
 		address,
 	)
+	if err == nil {
+		s.invalidateSelectionSnapshot()
+	}
 	return err
 }
 
@@ -637,6 +878,9 @@ func (s *Storage) UpdateLatency(address string, latencyMs int) error {
 		`UPDATE proxies SET latency = ? WHERE address = ?`,
 		latencyMs, address,
 	)
+	if err == nil {
+		s.invalidateSelectionSnapshot()
+	}
 	return err
 }
 
@@ -649,20 +893,21 @@ func (s *Storage) UpdateExitInfo(address, exitIP, exitLocation string, latencyMs
 		 WHERE address = ?`,
 		exitIP, exitLocation, latencyMs, grade, address,
 	)
+	if err == nil {
+		s.invalidateSelectionSnapshot()
+	}
 	return err
 }
 
 // RecordProxyUse 记录代理使用（成功）
 func (s *Storage) RecordProxyUse(address string, success bool) error {
 	if success {
-		_, err := s.db.Exec(
-			`UPDATE proxies
-			 SET use_count = use_count + 1, success_count = success_count + 1, fail_count = 0,
-			     last_used = CURRENT_TIMESTAMP
-			 WHERE address = ?`,
-			address,
-		)
-		return err
+		s.pendingUseMu.Lock()
+		if s.pendingSuccessUse != nil {
+			s.pendingSuccessUse[address]++
+		}
+		s.pendingUseMu.Unlock()
+		return nil
 	}
 	_, err := s.db.Exec(
 		`UPDATE proxies SET use_count = use_count + 1, fail_count = fail_count + 1, 
@@ -728,7 +973,11 @@ func (s *Storage) ReplaceProxy(oldAddress string, newProxy Proxy) error {
 		return err
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.invalidateSelectionSnapshot()
+	return nil
 }
 
 // MarkAsReplacementCandidate 标记代理为替换候选
@@ -745,6 +994,9 @@ func (s *Storage) MarkAsReplacementCandidate(addresses []string) error {
 	query := fmt.Sprintf(`UPDATE proxies SET status = 'candidate_replace' WHERE address IN (%s)`,
 		fmt.Sprintf("%s", placeholders))
 	_, err := s.db.Exec(query, args...)
+	if err == nil {
+		s.invalidateSelectionSnapshot()
+	}
 	return err
 }
 
@@ -846,7 +1098,11 @@ func (s *Storage) DeleteInvalid(maxFailCount int) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	affected, err := res.RowsAffected()
+	if affected > 0 {
+		s.invalidateSelectionSnapshot()
+	}
+	return affected, err
 }
 
 // DeleteBlockedCountries 删除指定国家代码出口的代理
@@ -865,6 +1121,9 @@ func (s *Storage) DeleteBlockedCountries(countryCodes []string) (int64, error) {
 		}
 		affected, _ := res.RowsAffected()
 		totalDeleted += affected
+	}
+	if totalDeleted > 0 {
+		s.invalidateSelectionSnapshot()
 	}
 	return totalDeleted, nil
 }
@@ -889,7 +1148,11 @@ func (s *Storage) DeleteNotAllowedCountries(allowedCodes []string) (int64, error
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	affected, err := res.RowsAffected()
+	if affected > 0 {
+		s.invalidateSelectionSnapshot()
+	}
+	return affected, err
 }
 
 // DeleteWithoutExitInfo 删除没有出口信息的代理（仅免费代理）
@@ -898,7 +1161,11 @@ func (s *Storage) DeleteWithoutExitInfo() (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	affected, err := res.RowsAffected()
+	if affected > 0 {
+		s.invalidateSelectionSnapshot()
+	}
+	return affected, err
 }
 
 // DisableBlockedCountries 禁用订阅代理中属于被屏蔽国家的（不删除）
@@ -917,6 +1184,9 @@ func (s *Storage) DisableBlockedCountries(countryCodes []string) (int64, error) 
 		}
 		affected, _ := res.RowsAffected()
 		total += affected
+	}
+	if total > 0 {
+		s.invalidateSelectionSnapshot()
 	}
 	return total, nil
 }
@@ -937,7 +1207,11 @@ func (s *Storage) DisableNotAllowedCountries(allowedCodes []string) (int64, erro
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	affected, err := res.RowsAffected()
+	if affected > 0 {
+		s.invalidateSelectionSnapshot()
+	}
+	return affected, err
 }
 
 // Count 返回可用代理数量（仅免费代理，用于 slot 计算）
@@ -984,6 +1258,9 @@ func (s *Storage) IncrementFailCount(address string) error {
 		`UPDATE proxies SET fail_count = fail_count + 1 WHERE address = ?`,
 		address,
 	)
+	if err == nil {
+		s.invalidateSelectionSnapshot()
+	}
 	return err
 }
 
@@ -1040,6 +1317,9 @@ func (s *Storage) AddProxyWithSource(address, protocol, source string, subscript
 			source, subID, status, address,
 		)
 	}
+	if err == nil {
+		s.invalidateSelectionSnapshot()
+	}
 	return err
 }
 
@@ -1049,7 +1329,11 @@ func (s *Storage) DeleteBySubscriptionID(subscriptionID int64) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	affected, err := res.RowsAffected()
+	if affected > 0 {
+		s.invalidateSelectionSnapshot()
+	}
+	return affected, err
 }
 
 // DisableProxy 禁用代理（软删除，用于订阅代理）
@@ -1058,6 +1342,9 @@ func (s *Storage) DisableProxy(address string) error {
 		`UPDATE proxies SET status = 'disabled' WHERE address = ?`,
 		address,
 	)
+	if err == nil {
+		s.invalidateSelectionSnapshot()
+	}
 	return err
 }
 
@@ -1067,6 +1354,9 @@ func (s *Storage) EnableProxy(address string) error {
 		`UPDATE proxies SET status = 'active', fail_count = 0 WHERE address = ?`,
 		address,
 	)
+	if err == nil {
+		s.invalidateSelectionSnapshot()
+	}
 	return err
 }
 
@@ -1109,7 +1399,11 @@ func (s *Storage) DeleteBySource(source string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	affected, err := res.RowsAffected()
+	if affected > 0 {
+		s.invalidateSelectionSnapshot()
+	}
+	return affected, err
 }
 
 // DeleteCustomProxiesNotIn 删除不在给定地址列表中的订阅代理
@@ -1128,7 +1422,11 @@ func (s *Storage) DeleteCustomProxiesNotIn(addresses []string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	affected, err := res.RowsAffected()
+	if affected > 0 {
+		s.invalidateSelectionSnapshot()
+	}
+	return affected, err
 }
 
 // ========== 订阅 CRUD ==========
@@ -1326,6 +1624,11 @@ func scanSubscription(rows *sql.Rows) (*Subscription, error) {
 
 // Close 关闭数据库
 func (s *Storage) Close() error {
+	if s.usageStopCh != nil {
+		close(s.usageStopCh)
+		s.usageWG.Wait()
+		s.usageStopCh = nil
+	}
 	return s.db.Close()
 }
 

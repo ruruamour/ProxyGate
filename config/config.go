@@ -45,6 +45,7 @@ type Config struct {
 	ProxyAuthUsername     string // 代理认证用户名（默认 "proxy"）
 	ProxyAuthPassword     string // 代理认证密码明文（用于 SOCKS5）
 	ProxyAuthPasswordHash string // 代理认证密码 SHA256 哈希（用于 HTTP）
+	LocalAuthBypass       bool   // 是否允许本地回环地址跳过代理认证（默认 true）
 
 	// 地理过滤配置
 	BlockedCountries []string // 屏蔽的国家代码列表（如 ["CN", "RU"]，默认 ["CN"]）
@@ -147,6 +148,22 @@ func envPort(key, fallback string) string {
 	return port
 }
 
+func envBoolDefault(key string, fallback bool) bool {
+	raw, ok := os.LookupEnv(key)
+	if !ok {
+		return fallback
+	}
+
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
+}
+
 func DefaultConfig() *Config {
 	// 优先从环境变量 WEBUI_PASSWORD 读取密码，未设置时使用默认密码
 	password := os.Getenv("WEBUI_PASSWORD")
@@ -161,6 +178,7 @@ func DefaultConfig() *Config {
 		proxyAuthUsername = "proxy"
 	}
 	proxyAuthPassword := os.Getenv("PROXY_AUTH_PASSWORD")
+	localAuthBypass := envBoolDefault("LOCAL_AUTH_BYPASS", true)
 	proxyAuthHash := ""
 	if proxyAuthPassword != "" {
 		proxyAuthHash = passwordHash(proxyAuthPassword)
@@ -241,6 +259,7 @@ func DefaultConfig() *Config {
 		ProxyAuthUsername:     proxyAuthUsername,
 		ProxyAuthPassword:     proxyAuthPassword,
 		ProxyAuthPasswordHash: proxyAuthHash,
+		LocalAuthBypass:       localAuthBypass,
 
 		// 地理过滤配置
 		BlockedCountries: blockedCountries,

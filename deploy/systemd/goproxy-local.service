@@ -1,0 +1,21 @@
+[Unit]
+Description=GoProxy Local
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/GoProxy
+ExecStart=%h/projects/GoProxy/proxygo
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+TimeoutStartSec=30
+KillMode=control-group
+SuccessExitStatus=0 143
+Environment=HOME=%h
+Environment=TMPDIR=/tmp
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

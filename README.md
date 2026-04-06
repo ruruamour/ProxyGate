@@ -2,16 +2,16 @@
 
 > **智能代理池系统** — 基于 Go 的轻量级、自适应代理池服务，支持免费代理自动抓取 + 付费订阅导入
 
-[![Docker Hub](https://img.shields.io/docker/v/isboyjc/goproxy?label=Docker%20Hub&logo=docker)](https://hub.docker.com/r/isboyjc/goproxy)
-[![GitHub Container Registry](https://img.shields.io/badge/GHCR-latest-blue?logo=github)](https://github.com/isboyjc/GoProxy/pkgs/container/goproxy)
+[![Upstream Docker Hub](https://img.shields.io/docker/v/isboyjc/goproxy?label=Upstream%20Docker%20Hub&logo=docker)](https://hub.docker.com/r/isboyjc/goproxy)
+[![Upstream GHCR](https://img.shields.io/badge/GHCR-upstream-blue?logo=github)](https://github.com/isboyjc/GoProxy/pkgs/container/goproxy)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go)](https://go.dev/)
 
 GoProxy 从公开代理源自动抓取 HTTP/SOCKS5 代理，同时支持导入 Clash/V2ray 订阅，通过出口 IP + 地理位置 + 延迟三重验证后统一入池，对外提供 HTTP 和 SOCKS5 双协议代理服务。订阅节点会先以禁用状态入库，验证通过后再激活，失败节点保留并定时探测恢复。
 
-**GitHub**：[github.com/isboyjc/GoProxy](https://github.com/isboyjc/GoProxy)
+**原项目**：[github.com/isboyjc/GoProxy](https://github.com/isboyjc/GoProxy)
 
-![](https://cdn.amux.ai/data/1322149f78ab57adb821ce731c11a9e944504649.png)
+> 当前仓库基于原项目继续演进，并保持整体结构与使用方式基本一致。`docker-compose.yml` 默认会构建并运行当前仓库代码；README 中提到的 Docker Hub / GHCR 预构建镜像均指上游仓库产物，如果要运行当前 fork，优先使用 `docker compose build` 或 `docker compose up -d` 直接构建。
 
 ## 核心特性
 
@@ -62,7 +62,7 @@ GoProxy 从公开代理源自动抓取 HTTP/SOCKS5 代理，同时支持导入 C
 ### Docker 部署（推荐）
 
 ```bash
-# 一键启动（自动拉取最新镜像）
+# 一键启动（默认构建当前仓库代码）
 docker compose up -d
 
 # 访问 WebUI
@@ -74,6 +74,13 @@ docker compose up -d
 ```bash
 cp .env.example .env
 vim .env  # 修改密码、认证、地理过滤等
+docker compose up -d
+```
+
+如果要改回上游预构建镜像：
+
+```bash
+# 注释 build: .，恢复 image / pull_policy
 docker compose up -d
 ```
 
@@ -99,6 +106,7 @@ go build -o proxygo . && ./proxygo
 - 程序会自动加载仓库根目录 `.env`
 - 已经导出的系统环境变量优先，不会被 `.env` 覆盖
 - 推荐在 `.env` 中设置 `DATA_DIR=./data`，把数据库、配置和 sing-box 文件都落在项目目录里
+- 直接 `go run .` 时默认不过滤国家；如果直接使用 `.env.example`，示例值会把 `BLOCKED_COUNTRIES` 设为 `CN`
 - 未安装 [sing-box](https://sing-box.sagernet.org/) 也能启动服务，但加密订阅节点导入不可用
 
 ## 使用代理
@@ -227,7 +235,7 @@ ssh -o ProxyCommand='nc -X 5 -x localhost:7779 %h %p' user@remote-server
 
 ## Docker 部署详解
 
-### docker run 方式
+### docker run 方式（使用上游预构建镜像）
 
 ```bash
 docker run -d --name proxygo \
@@ -280,7 +288,7 @@ docker compose up -d
 | `PROXY_AUTH_ENABLED` | `false` | 否 | 代理认证开关，公网部署建议启用 |
 | `PROXY_AUTH_USERNAME` | `proxy` | 否 | 代理认证用户名 |
 | `PROXY_AUTH_PASSWORD` | 空 | 否 | 代理认证密码，启用认证时必填 |
-| `BLOCKED_COUNTRIES` | `CN` | 否 | 屏蔽国家代码（逗号分隔，留空不屏蔽） |
+| `BLOCKED_COUNTRIES` | 本地运行默认空；`.env.example`/docker-compose 示例为 `CN` | 否 | 屏蔽国家代码（逗号分隔，留空不屏蔽） |
 | `ALLOWED_COUNTRIES` | 空 | 否 | 允许国家白名单（非空时优先于黑名单） |
 | `CUSTOM_PROXY_MODE` | `mixed` | 否 | 代理模式：mixed / custom_only / free_only |
 | `SINGBOX_PATH` | `sing-box` | 否 | sing-box 路径（Docker 内置，无需修改） |
