@@ -1,13 +1,13 @@
 # GoProxy
 
-> **智能代理池系统** — 基于 Go 的轻量级、自适应代理池服务，支持免费代理自动抓取 + 付费订阅导入
+> **自托管代理网关** — 聚合公开代理与订阅节点，统一验证入池，并稳定输出 HTTP 和 SOCKS5 代理服务
 
 [![Upstream Docker Hub](https://img.shields.io/docker/v/isboyjc/goproxy?label=Upstream%20Docker%20Hub&logo=docker)](https://hub.docker.com/r/isboyjc/goproxy)
 [![Upstream GHCR](https://img.shields.io/badge/GHCR-upstream-blue?logo=github)](https://github.com/isboyjc/GoProxy/pkgs/container/goproxy)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go)](https://go.dev/)
 
-GoProxy 从公开代理源自动抓取 HTTP/SOCKS5 代理，同时支持导入 Clash/V2ray 订阅，通过出口 IP + 地理位置 + 延迟三重验证后统一入池，对外提供 HTTP 和 SOCKS5 双协议代理服务。订阅节点会先以禁用状态入库，验证通过后再激活，失败节点保留并定时探测恢复。
+GoProxy 是一个基于 Go 的自托管代理网关，聚合公开代理与 Clash/V2ray 等订阅节点，通过出口 IP、地理位置、延迟和 HTTPS CONNECT 可用性验证后统一入池，对外提供 HTTP 和 SOCKS5 两种代理入口。订阅节点会先以禁用状态入库，验证通过后再激活，失败节点保留并定时探测恢复。
 
 **原项目**：[github.com/isboyjc/GoProxy](https://github.com/isboyjc/GoProxy)
 
