@@ -34,6 +34,13 @@ func NewSOCKS5(s *storage.Storage, cfg *config.Config, sessions *SessionManager,
 	}
 }
 
+func (s *SOCKS5Server) currentConfig() *config.Config {
+	if cfg := config.Get(); cfg != nil {
+		return cfg
+	}
+	return s.cfg
+}
+
 // Start 启动 SOCKS5 服务器
 func (s *SOCKS5Server) Start() error {
 	modeDesc := "随机轮换"
@@ -64,7 +71,7 @@ func (s *SOCKS5Server) Start() error {
 // handleConnection 处理 SOCKS5 连接
 func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 	defer clientConn.Close()
-	timeout := time.Duration(s.cfg.ValidateTimeout) * time.Second
+	timeout := time.Duration(s.currentConfig().ValidateTimeout) * time.Second
 	_ = clientConn.SetDeadline(time.Now().Add(timeout))
 
 	// SOCKS5 握手
@@ -80,11 +87,16 @@ func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 		log.Printf("[socks5] read request failed: %v", err)
 		return
 	}
+	if !shouldPenalizeProxyForTarget(target) {
+		log.Printf("[socks5] skip non-public target %s without penalizing proxy", target)
+		s.sendSOCKS5Reply(clientConn, 0x04) // Host unreachable
+		return
+	}
 
 	// 带重试的连接上游代理
 	// 重试机制：只使用 SOCKS5 协议的上游代理（天然支持 HTTPS）
 	tried := []string{}
-	maxRetries := s.cfg.MaxRetry + 2 // 增加重试次数以应对质量差的代理
+	maxRetries := s.currentConfig().MaxRetry + 2 // 增加重试次数以应对质量差的代理
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		p, err := s.selectSOCKS5Proxy(tried, opts)
@@ -117,15 +129,20 @@ func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 		_ = clientConn.SetDeadline(time.Time{})
 		_ = upstreamConn.SetDeadline(time.Time{})
 
-		s.storage.RecordProxyUse(p.Address, true)
 		log.Printf("[socks5] %s via %s established", target, p.Address)
-
-		// 双向转发数据
-		go io.Copy(upstreamConn, clientConn)
-		io.Copy(clientConn, upstreamConn)
-
-		// 转发完成，关闭连接
-		upstreamConn.Close()
+		outcome := relayTunnel(clientConn, upstreamConn)
+		if tunnelLooksHealthy(outcome) {
+			s.storage.RecordProxyUse(p.Address, true)
+		} else {
+			log.Printf(
+				"[socks5] %s via %s closed before upstream response, keep proxy (duration=%s client_bytes=%d upstream_bytes=%d)",
+				target,
+				p.Address,
+				outcome.duration.Truncate(time.Millisecond),
+				outcome.clientBytes,
+				outcome.upstreamBytes,
+			)
+		}
 		return
 	}
 
@@ -136,7 +153,7 @@ func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 
 // selectSOCKS5Proxy 根据使用模式选择 SOCKS5 上游代理
 func (s *SOCKS5Server) selectSOCKS5Proxy(tried []string, opts RequestOptions) (*storage.Proxy, error) {
-	cfg := s.cfg
+	cfg := s.currentConfig()
 	if sticky := selectExistingStickyProxy(s.storage, s.sessions, "socks5", tried, opts); sticky != nil {
 		return sticky, nil
 	}
@@ -184,7 +201,7 @@ func (s *SOCKS5Server) socks5Handshake(conn net.Conn) (RequestOptions, error) {
 	}
 
 	// 检查是否需要认证
-	needAuth := s.cfg.ProxyAuthEnabled
+	needAuth := s.currentConfig().ProxyAuthEnabled
 	methods := buf[2 : 2+nmethods]
 
 	// 选择认证方式
@@ -270,8 +287,9 @@ func (s *SOCKS5Server) socks5Auth(conn net.Conn) (RequestOptions, error) {
 	password := string(buf[2+ulen+1 : 2+ulen+1+plen])
 
 	// 验证用户名和密码
-	opts, err := parseUsernameOptions(s.cfg.ProxyAuthUsername, username, s.sessionNamespace)
-	if err != nil || password != s.cfg.ProxyAuthPassword {
+	cfg := s.currentConfig()
+	opts, err := parseUsernameOptions(cfg.ProxyAuthUsername, username, s.sessionNamespace)
+	if err != nil || password != cfg.ProxyAuthPassword {
 		// 认证失败: [VER(1), STATUS(1)]
 		conn.Write([]byte{0x01, 0x01})
 		return RequestOptions{}, fmt.Errorf("authentication failed")
@@ -370,7 +388,7 @@ func (s *SOCKS5Server) sendSOCKS5Reply(conn net.Conn, rep byte) error {
 
 // dialViaProxy 通过上游代理连接目标
 func (s *SOCKS5Server) dialViaProxy(p *storage.Proxy, target string) (net.Conn, error) {
-	timeout := time.Duration(s.cfg.ValidateTimeout) * time.Second
+	timeout := time.Duration(s.currentConfig().ValidateTimeout) * time.Second
 
 	switch p.Protocol {
 	case "http":
@@ -442,16 +460,10 @@ func (s *SOCKS5Server) dialViaProxy(p *storage.Proxy, target string) (net.Conn, 
 			return nil, err
 		}
 
-		// 读取响应
-		reply := make([]byte, 10)
-		if _, err := io.ReadAtLeast(proxyConn, reply, 10); err != nil {
+		// 读取响应。BND.ADDR 是可变长字段，必须完整消费，否则后续业务流量会被污染。
+		if err := readSOCKS5ConnectReply(proxyConn); err != nil {
 			proxyConn.Close()
 			return nil, err
-		}
-
-		if reply[1] != 0x00 {
-			proxyConn.Close()
-			return nil, fmt.Errorf("socks5 connect failed, code: %d", reply[1])
 		}
 
 		if err := proxyConn.SetDeadline(time.Time{}); err != nil {
@@ -464,4 +476,38 @@ func (s *SOCKS5Server) dialViaProxy(p *storage.Proxy, target string) (net.Conn, 
 	default:
 		return nil, fmt.Errorf("unsupported protocol: %s", p.Protocol)
 	}
+}
+
+func readSOCKS5ConnectReply(r io.Reader) error {
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(r, header); err != nil {
+		return err
+	}
+	if header[0] != 0x05 {
+		return fmt.Errorf("invalid socks5 reply version: %d", header[0])
+	}
+	if header[1] != 0x00 {
+		return fmt.Errorf("socks5 connect failed, code: %d", header[1])
+	}
+
+	var discard int64
+	switch header[3] {
+	case 0x01: // IPv4
+		discard = 4 + 2
+	case 0x04: // IPv6
+		discard = 16 + 2
+	case 0x03: // Domain
+		addrLen := make([]byte, 1)
+		if _, err := io.ReadFull(r, addrLen); err != nil {
+			return err
+		}
+		discard = int64(addrLen[0]) + 2
+	default:
+		return fmt.Errorf("unsupported socks5 reply address type: %d", header[3])
+	}
+
+	if _, err := io.CopyN(io.Discard, r, discard); err != nil {
+		return err
+	}
+	return nil
 }

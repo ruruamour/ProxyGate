@@ -27,11 +27,23 @@ func NewHealthChecker(s *storage.Storage, v *validator.Validator, cfg *config.Co
 	}
 }
 
+func (hc *HealthChecker) currentConfig() *config.Config {
+	if cfg := config.Get(); cfg != nil {
+		return cfg
+	}
+	return hc.cfg
+}
+
 // RunOnce 执行一次健康检查
 func (hc *HealthChecker) RunOnce() {
 	start := time.Now()
 	log.Println("[health] 开始健康检查...")
-	validate := validator.New(hc.cfg.HealthCheckConcurrency, hc.cfg.ValidateTimeout, hc.cfg.ValidateURL)
+	cfg := hc.currentConfig()
+	validate := validator.New(cfg.HealthCheckConcurrency, cfg.ValidateTimeout, cfg.ValidateURL)
+	if cfg.CustomProxyMode == "custom_only" {
+		log.Println("[health] custom_only 模式，跳过免费池健康检查")
+		return
+	}
 
 	// 获取池子状态
 	status, err := hc.poolMgr.GetStatus()
@@ -50,7 +62,7 @@ func (hc *HealthChecker) RunOnce() {
 	}
 
 	// 批量获取需要检查的代理
-	proxies, err := hc.storage.GetBatchForHealthCheck(hc.cfg.HealthCheckBatchSize, skipSGrade)
+	proxies, err := hc.storage.GetBatchForHealthCheck(cfg.HealthCheckBatchSize, skipSGrade, "free")
 	if err != nil {
 		log.Printf("[health] 获取检查批次失败: %v", err)
 		return
@@ -61,7 +73,7 @@ func (hc *HealthChecker) RunOnce() {
 		return
 	}
 
-	log.Printf("[health] 检查 %d 个代理（跳过S级=%v）", len(proxies), skipSGrade)
+	log.Printf("[health] 检查 %d 个免费代理（跳过S级=%v）", len(proxies), skipSGrade)
 
 	// 执行验证
 	validCount := 0
@@ -99,11 +111,16 @@ func (hc *HealthChecker) RunOnce() {
 
 // StartBackground 后台定时健康检查
 func (hc *HealthChecker) StartBackground() {
-	ticker := time.NewTicker(time.Duration(hc.cfg.HealthCheckInterval) * time.Minute)
 	go func() {
-		for range ticker.C {
+		for {
+			cfg := hc.currentConfig()
+			interval := time.Duration(cfg.HealthCheckInterval) * time.Minute
+			if interval <= 0 {
+				interval = 5 * time.Minute
+			}
+			<-time.After(interval)
 			hc.RunOnce()
 		}
 	}()
-	log.Printf("[health] 健康检查器已启动，间隔 %d 分钟", hc.cfg.HealthCheckInterval)
+	log.Printf("[health] 健康检查器已启动，间隔 %d 分钟", hc.currentConfig().HealthCheckInterval)
 }

@@ -228,13 +228,23 @@ func selectFromPool(
 		defer unlock()
 	}
 
-	stickyAddress := ""
 	if sessions != nil && opts.SessionKey != "" {
-		stickyAddress, _ = sessions.Get(opts.SessionKey)
-	}
-
-	if stickyAddress != "" && sessions != nil {
-		sessions.Delete(opts.SessionKey)
+		if stickyAddress, ok := sessions.Get(opts.SessionKey); ok && stickyAddress != "" {
+			stickyTried := false
+			for _, addr := range tried {
+				if addr == stickyAddress {
+					stickyTried = true
+					break
+				}
+			}
+			if !stickyTried {
+				proxy, err := store.GetByAddress(stickyAddress)
+				if err == nil && matchesProxyFilters(*proxy, protocol, opts) {
+					return proxy, nil
+				}
+			}
+			sessions.Delete(opts.SessionKey)
+		}
 	}
 
 	picked, err := store.SelectProxy(sourceFilter, protocol, opts.Region, opts.State, tried, lowestLatency)

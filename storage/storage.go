@@ -63,13 +63,22 @@ type Storage struct {
 	db *sql.DB
 }
 
+func sqliteDSN(path string) string {
+	if strings.Contains(path, "?") {
+		return path + "&_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL"
+	}
+	return path + "?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL"
+}
+
 func New(dbPath string) (*Storage, error) {
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite3", sqliteDSN(dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 
-	db.SetMaxOpenConns(1) // SQLite 单写
+	// WAL 允许多读单写，保持小连接池即可显著减少高并发下的串行阻塞。
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(4)
 
 	s := &Storage{db: db}
 	if err := s.initSchema(); err != nil {
@@ -406,25 +415,25 @@ func (s *Storage) SelectProxy(
 	excludes []string,
 	lowestLatency bool,
 ) (*Proxy, error) {
-	query := `SELECT ` + proxyColumns + `
+	baseQuery := `
 		 FROM proxies
 		 WHERE status IN ('active', 'degraded') AND fail_count < 3`
 	args := make([]interface{}, 0, 8+len(excludes))
 
 	if sourceFilter != "" {
-		query += ` AND source = ?`
+		baseQuery += ` AND source = ?`
 		args = append(args, sourceFilter)
 	}
 	if protocol != "" {
-		query += ` AND protocol = ?`
+		baseQuery += ` AND protocol = ?`
 		args = append(args, protocol)
 	}
 	if region != "" {
-		query += ` AND (UPPER(exit_location) = ? OR UPPER(exit_location) LIKE ?)`
+		baseQuery += ` AND (UPPER(exit_location) = ? OR UPPER(exit_location) LIKE ?)`
 		args = append(args, region, region+" %")
 	}
 	if state != "" {
-		query += ` AND UPPER(exit_location) LIKE ?`
+		baseQuery += ` AND UPPER(exit_location) LIKE ?`
 		args = append(args, "%"+state+"%")
 	}
 	if len(excludes) > 0 {
@@ -433,15 +442,37 @@ func (s *Storage) SelectProxy(
 			placeholders[i] = "?"
 			args = append(args, address)
 		}
-		query += ` AND address NOT IN (` + strings.Join(placeholders, ",") + `)`
+		baseQuery += ` AND address NOT IN (` + strings.Join(placeholders, ",") + `)`
 	}
 
 	if lowestLatency {
-		query += ` ORDER BY latency ASC, fail_count ASC`
-	} else {
-		query += ` ORDER BY RANDOM()`
+		query := `SELECT ` + proxyColumns + baseQuery + ` ORDER BY latency ASC, fail_count ASC LIMIT 1`
+
+		rows, err := s.db.Query(query, args...)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		if rows.Next() {
+			return scanProxy(rows)
+		}
+		return nil, fmt.Errorf("no available proxy")
 	}
-	query += ` LIMIT 1`
+
+	// 随机模式避免在热路径上使用 ORDER BY RANDOM()，减少 SQLite 全表随机排序开销。
+	countQuery := `SELECT COUNT(*)` + baseQuery
+	var count int
+	if err := s.db.QueryRow(countQuery, args...).Scan(&count); err != nil {
+		return nil, err
+	}
+	if count == 0 {
+		return nil, fmt.Errorf("no available proxy")
+	}
+
+	offset := rand.Intn(count)
+	query := `SELECT ` + proxyColumns + baseQuery + ` ORDER BY id ASC LIMIT 1 OFFSET ?`
+	args = append(args, offset)
 
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
@@ -755,11 +786,18 @@ func (s *Storage) GetQualityDistribution() (map[string]int, error) {
 	return dist, nil
 }
 
-// GetBatchForHealthCheck 获取一批需要健康检查的代理
-func (s *Storage) GetBatchForHealthCheck(batchSize int, skipSGrade bool) ([]Proxy, error) {
+// GetBatchForHealthCheck 获取一批需要健康检查的代理。
+// sourceFilter 为空时检查全部来源；非空时仅检查指定来源。
+func (s *Storage) GetBatchForHealthCheck(batchSize int, skipSGrade bool, sourceFilter string) ([]Proxy, error) {
 	query := `SELECT ` + proxyColumns + `
 		 FROM proxies
 		 WHERE status IN ('active', 'degraded') AND fail_count < 3`
+	args := []interface{}{}
+
+	if sourceFilter != "" {
+		query += ` AND source = ?`
+		args = append(args, sourceFilter)
+	}
 
 	if skipSGrade {
 		query += ` AND quality_grade != 'S'`
@@ -770,7 +808,8 @@ func (s *Storage) GetBatchForHealthCheck(batchSize int, skipSGrade bool) ([]Prox
 		quality_grade DESC
 		LIMIT ?`
 
-	rows, err := s.db.Query(query, batchSize)
+	args = append(args, batchSize)
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}

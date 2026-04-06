@@ -32,6 +32,11 @@ type Server struct {
 	clientCache      sync.Map
 }
 
+type cachedHTTPClient struct {
+	client    *http.Client
+	transport *http.Transport
+}
+
 func New(s *storage.Storage, cfg *config.Config, sessions *SessionManager, mode string, port string) *Server {
 	return &Server{
 		storage:          s,
@@ -41,6 +46,13 @@ func New(s *storage.Storage, cfg *config.Config, sessions *SessionManager, mode 
 		mode:             mode,
 		port:             port,
 	}
+}
+
+func (s *Server) currentConfig() *config.Config {
+	if cfg := config.Get(); cfg != nil {
+		return cfg
+	}
+	return s.cfg
 }
 
 func (s *Server) Start() error {
@@ -66,7 +78,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	opts := RequestOptions{}
 
 	// 认证检查（如果启用）
-	if s.cfg.ProxyAuthEnabled {
+	if s.currentConfig().ProxyAuthEnabled {
 		var ok bool
 		opts, ok = s.parseAuth(r)
 		if !ok {
@@ -111,12 +123,13 @@ func (s *Server) parseAuth(r *http.Request) (RequestOptions, bool) {
 
 	// 验证用户名和密码
 	passwordHash := fmt.Sprintf("%x", sha256.Sum256([]byte(password)))
-	passwordMatch := subtle.ConstantTimeCompare([]byte(passwordHash), []byte(s.cfg.ProxyAuthPasswordHash)) == 1
+	cfg := s.currentConfig()
+	passwordMatch := subtle.ConstantTimeCompare([]byte(passwordHash), []byte(cfg.ProxyAuthPasswordHash)) == 1
 	if !passwordMatch {
 		return RequestOptions{}, false
 	}
 
-	opts, err := parseUsernameOptions(s.cfg.ProxyAuthUsername, username, s.sessionNamespace)
+	opts, err := parseUsernameOptions(cfg.ProxyAuthUsername, username, s.sessionNamespace)
 	if err != nil {
 		return RequestOptions{}, false
 	}
@@ -126,7 +139,7 @@ func (s *Server) parseAuth(r *http.Request) (RequestOptions, bool) {
 
 // selectProxy 根据使用模式和选择策略获取代理
 func (s *Server) selectProxy(tried []string, lowestLatency bool, opts RequestOptions) (*storage.Proxy, error) {
-	cfg := s.cfg
+	cfg := s.currentConfig()
 	if sticky := selectExistingStickyProxy(s.storage, s.sessions, "", tried, opts); sticky != nil {
 		return sticky, nil
 	}
@@ -174,9 +187,19 @@ func sourceFilterFromMode(mode string) string {
 
 // handleHTTP 处理普通 HTTP 请求（带自动重试）
 func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, opts RequestOptions) {
+	target := r.Host
+	if r.URL != nil && r.URL.Host != "" {
+		target = r.URL.Host
+	}
+	if !shouldPenalizeProxyForTarget(target) {
+		log.Printf("[proxy] skip non-public target %s without penalizing proxy", target)
+		http.Error(w, "target is not routable through upstream proxy", http.StatusBadGateway)
+		return
+	}
+
 	var tried []string
 	bodyReplayable := requestReplayable(r)
-	maxAttempts := s.cfg.MaxRetry
+	maxAttempts := s.currentConfig().MaxRetry
 	if !bodyReplayable {
 		maxAttempts = 0
 	}
@@ -203,6 +226,7 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, opts Request
 
 		client, err := s.buildClient(p)
 		if err != nil {
+			s.evictClient(p)
 			removeOrDisableProxy(s.storage, p)
 			continue
 		}
@@ -214,11 +238,12 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, opts Request
 
 		resp, err := client.Do(req)
 		if err != nil {
-			log.Printf("[proxy] %s via %s failed, removing", r.RequestURI, p.Address)
+			log.Printf("[proxy] %s %s via %s failed, removing", r.Method, target, p.Address)
 			s.storage.RecordProxyUse(p.Address, false)
 			if opts.SessionKey != "" {
 				s.sessions.Delete(opts.SessionKey)
 			}
+			s.evictClient(p)
 			removeOrDisableProxy(s.storage, p)
 			continue
 		}
@@ -234,9 +259,9 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, opts Request
 		io.Copy(w, resp.Body)
 		s.storage.RecordProxyUse(p.Address, true)
 		if resp.StatusCode == 429 {
-			log.Printf("[proxy] ⚠️  429 %s via %s (protocol=%s)", r.RequestURI, p.Address, p.Protocol)
+			log.Printf("[proxy] ⚠️  429 %s %s via %s (protocol=%s)", r.Method, target, p.Address, p.Protocol)
 		} else {
-			log.Printf("[proxy] %s via %s -> %d", r.RequestURI, p.Address, resp.StatusCode)
+			log.Printf("[proxy] %s %s via %s -> %d", r.Method, target, p.Address, resp.StatusCode)
 		}
 		return
 	}
@@ -246,8 +271,15 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request, opts Request
 
 // handleTunnel 处理 HTTPS CONNECT 隧道（带自动重试）
 func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request, opts RequestOptions) {
+	if !shouldPenalizeProxyForTarget(r.Host) {
+		log.Printf("[tunnel] skip non-public target %s without penalizing proxy", r.Host)
+		http.Error(w, "target is not routable through upstream proxy", http.StatusBadGateway)
+		return
+	}
+
 	var tried []string
-	for attempt := 0; attempt <= s.cfg.MaxRetry; attempt++ {
+	maxRetries := s.currentConfig().MaxRetry
+	for attempt := 0; attempt <= maxRetries; attempt++ {
 		p, err := s.selectProxy(tried, s.mode == "lowest-latency", opts)
 		if err != nil {
 			http.Error(w, "no available proxy", http.StatusServiceUnavailable)
@@ -267,8 +299,6 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request, opts Reque
 			continue
 		}
 
-		s.storage.RecordProxyUse(p.Address, true)
-
 		// 告知客户端隧道建立
 		hijacker, ok := w.(http.Hijacker)
 		if !ok {
@@ -285,9 +315,22 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request, opts Reque
 		fmt.Fprintf(clientConn, "HTTP/1.1 200 Connection Established\r\n\r\n")
 		log.Printf("[tunnel] %s via %s established", r.Host, p.Address)
 
-		// 双向转发
-		go transfer(conn, clientConn)
-		go transfer(clientConn, conn)
+		go func(proxyAddress string, upstreamConn, downstreamConn net.Conn, sessionKey string) {
+			outcome := relayTunnel(downstreamConn, upstreamConn)
+			if tunnelLooksHealthy(outcome) {
+				s.storage.RecordProxyUse(proxyAddress, true)
+				return
+			}
+
+			log.Printf(
+				"[tunnel] %s via %s closed before upstream response, keep proxy (duration=%s client_bytes=%d upstream_bytes=%d)",
+				r.Host,
+				proxyAddress,
+				outcome.duration.Truncate(time.Millisecond),
+				outcome.clientBytes,
+				outcome.upstreamBytes,
+			)
+		}(p.Address, conn, clientConn, opts.SessionKey)
 		return
 	}
 
@@ -295,7 +338,7 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request, opts Reque
 }
 
 func (s *Server) dialViaProxy(p *storage.Proxy, host string) (net.Conn, error) {
-	timeout := time.Duration(s.cfg.ValidateTimeout) * time.Second
+	timeout := time.Duration(s.currentConfig().ValidateTimeout) * time.Second
 	switch p.Protocol {
 	case "http":
 		return dialHTTPConnect(p.Address, host, timeout)
@@ -311,17 +354,26 @@ func (s *Server) dialViaProxy(p *storage.Proxy, host string) (net.Conn, error) {
 }
 
 func (s *Server) buildClient(p *storage.Proxy) (*http.Client, error) {
-	cacheKey := p.Protocol + "|" + p.Address
+	timeout := time.Duration(s.currentConfig().ValidateTimeout) * time.Second
+	cacheKey := fmt.Sprintf("%s|%s|%s", p.Protocol, p.Address, timeout)
 	if cached, ok := s.clientCache.Load(cacheKey); ok {
-		return cached.(*http.Client), nil
+		return cached.(*cachedHTTPClient).client, nil
 	}
 
-	timeout := time.Duration(s.cfg.ValidateTimeout) * time.Second
+	baseDialer := &net.Dialer{
+		Timeout:   timeout,
+		KeepAlive: 30 * time.Second,
+	}
 	transport := &http.Transport{
-		MaxIdleConns:        256,
-		MaxIdleConnsPerHost: 32,
-		IdleConnTimeout:     90 * time.Second,
-		TLSHandshakeTimeout: timeout,
+		DialContext:           baseDialer.DialContext,
+		ForceAttemptHTTP2:     false,
+		MaxIdleConns:          64,
+		MaxIdleConnsPerHost:   4,
+		MaxConnsPerHost:       8,
+		IdleConnTimeout:       30 * time.Second,
+		TLSHandshakeTimeout:   timeout,
+		ResponseHeaderTimeout: timeout,
+		ExpectContinueTimeout: time.Second,
 	}
 
 	var client *http.Client
@@ -334,7 +386,7 @@ func (s *Server) buildClient(p *storage.Proxy) (*http.Client, error) {
 		transport.Proxy = http.ProxyURL(proxyURL)
 		client = &http.Client{Transport: transport, Timeout: timeout}
 	case "socks5":
-		dialer, err := proxy.SOCKS5("tcp", p.Address, nil, proxy.Direct)
+		dialer, err := proxy.SOCKS5("tcp", p.Address, nil, baseDialer)
 		if err != nil {
 			return nil, err
 		}
@@ -346,8 +398,29 @@ func (s *Server) buildClient(p *storage.Proxy) (*http.Client, error) {
 		return nil, fmt.Errorf("unsupported protocol: %s", p.Protocol)
 	}
 
-	actual, _ := s.clientCache.LoadOrStore(cacheKey, client)
-	return actual.(*http.Client), nil
+	entry := &cachedHTTPClient{client: client, transport: transport}
+	actual, loaded := s.clientCache.LoadOrStore(cacheKey, entry)
+	if loaded {
+		transport.CloseIdleConnections()
+		return actual.(*cachedHTTPClient).client, nil
+	}
+	return client, nil
+}
+
+func (s *Server) evictClient(p *storage.Proxy) {
+	if p == nil {
+		return
+	}
+	cacheKeyPrefix := p.Protocol + "|" + p.Address + "|"
+	s.clientCache.Range(func(key, value any) bool {
+		keyStr, ok := key.(string)
+		if !ok || !strings.HasPrefix(keyStr, cacheKeyPrefix) {
+			return true
+		}
+		s.clientCache.Delete(key)
+		value.(*cachedHTTPClient).transport.CloseIdleConnections()
+		return true
+	})
 }
 
 func hasRequestBody(r *http.Request) bool {
@@ -436,10 +509,4 @@ func dialHTTPConnect(proxyAddress string, host string, timeout time.Duration) (n
 	}
 
 	return conn, nil
-}
-
-func transfer(dst io.WriteCloser, src io.ReadCloser) {
-	defer dst.Close()
-	defer src.Close()
-	io.Copy(dst, src)
 }

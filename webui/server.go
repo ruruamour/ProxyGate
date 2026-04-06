@@ -1,13 +1,18 @@
 package webui
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,15 +27,29 @@ import (
 // 简单内存 session
 var (
 	sessions   = make(map[string]time.Time)
-	sessionsMu sync.Mutex
+	sessionsMu sync.RWMutex
 )
 
-func newSession() string {
-	token := fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprintf("%d", time.Now().UnixNano()))))
+func cleanupExpiredSessionsLocked(now time.Time) {
+	for token, expiry := range sessions {
+		if now.After(expiry) {
+			delete(sessions, token)
+		}
+	}
+}
+
+func newSession() (string, error) {
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return "", err
+	}
+	token := hex.EncodeToString(tokenBytes)
+	now := time.Now()
 	sessionsMu.Lock()
-	sessions[token] = time.Now().Add(24 * time.Hour)
+	sessions[token] = now.Add(24 * time.Hour)
+	cleanupExpiredSessionsLocked(now)
 	sessionsMu.Unlock()
-	return token
+	return token, nil
 }
 
 func validSession(r *http.Request) bool {
@@ -38,10 +57,72 @@ func validSession(r *http.Request) bool {
 	if err != nil {
 		return false
 	}
-	sessionsMu.Lock()
+	sessionsMu.RLock()
 	expiry, ok := sessions[cookie.Value]
+	sessionsMu.RUnlock()
+	if !ok {
+		return false
+	}
+	if time.Now().Before(expiry) {
+		return true
+	}
+
+	sessionsMu.Lock()
+	if currentExpiry, stillOK := sessions[cookie.Value]; stillOK && currentExpiry.Equal(expiry) {
+		delete(sessions, cookie.Value)
+	}
 	sessionsMu.Unlock()
-	return ok && time.Now().Before(expiry)
+	return false
+}
+
+func requestIsSecure(r *http.Request) bool {
+	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
+func canonicalRequestHost(r *http.Request) (string, string) {
+	u := &url.URL{Host: r.Host}
+	host := strings.ToLower(u.Hostname())
+	port := u.Port()
+	if port == "" {
+		if requestIsSecure(r) {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	return host, port
+}
+
+func sameOriginRequest(r *http.Request) bool {
+	requestHost, requestPort := canonicalRequestHost(r)
+	if requestHost == "" {
+		return false
+	}
+
+	for _, raw := range []string{r.Header.Get("Origin"), r.Referer()} {
+		if raw == "" {
+			continue
+		}
+		u, err := url.Parse(raw)
+		if err != nil {
+			continue
+		}
+		host := strings.ToLower(u.Hostname())
+		port := u.Port()
+		if port == "" {
+			switch strings.ToLower(u.Scheme) {
+			case "https":
+				port = "443"
+			case "http":
+				port = "80"
+			}
+		}
+		if host == requestHost && port == requestPort {
+			return true
+		}
+	}
+
+	return false
 }
 
 type FetchTrigger func()
@@ -83,7 +164,7 @@ func (s *Server) Start() {
 	// 只读 API（访客可访问）
 	mux.HandleFunc("/api/stats", s.readOnlyMiddleware(s.apiStats))
 	mux.HandleFunc("/api/proxies", s.readOnlyMiddleware(s.apiProxies))
-	mux.HandleFunc("/api/logs", s.readOnlyMiddleware(s.apiLogs))
+	mux.HandleFunc("/api/logs", s.apiLogs)
 	mux.HandleFunc("/api/pool/status", s.readOnlyMiddleware(s.apiPoolStatus))
 	mux.HandleFunc("/api/pool/quality", s.readOnlyMiddleware(s.apiQualityDistribution))
 	mux.HandleFunc("/api/config", s.readOnlyMiddleware(s.apiConfig))
@@ -125,6 +206,12 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			http.Redirect(w, r, "/login", http.StatusFound)
 			return
 		}
+		if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch || r.Method == http.MethodDelete {
+			if !sameOriginRequest(r) {
+				jsonError(w, "forbidden", http.StatusForbidden)
+				return
+			}
+		}
 		next(w, r)
 	}
 }
@@ -151,18 +238,24 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	password := r.FormValue("password")
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(password)))
-	if hash != s.cfg.WebUIPasswordHash {
+	if subtle.ConstantTimeCompare([]byte(hash), []byte(s.cfg.WebUIPasswordHash)) != 1 {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, loginHTMLWithError)
 		return
 	}
-	token := newSession()
+	token, err := newSession()
+	if err != nil {
+		jsonError(w, "failed to create session", http.StatusInternalServerError)
+		return
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     "session",
 		Value:    token,
 		Path:     "/",
 		Expires:  time.Now().Add(24 * time.Hour),
 		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   requestIsSecure(r),
 	})
 	http.Redirect(w, r, "/", http.StatusFound)
 }
@@ -173,7 +266,15 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		delete(sessions, cookie.Value)
 		sessionsMu.Unlock()
 	}
-	http.SetCookie(w, &http.Cookie{Name: "session", Value: "", Path: "/", MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{
+		Name:     "session",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   requestIsSecure(r),
+	})
 	http.Redirect(w, r, "/login", http.StatusFound)
 }
 
@@ -346,6 +447,10 @@ func (s *Server) apiRefreshLatency(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiLogs(w http.ResponseWriter, r *http.Request) {
+	if !validSession(r) {
+		jsonOK(w, map[string]interface{}{"lines": []string{}})
+		return
+	}
 	lines := logger.GetLines(100)
 	jsonOK(w, map[string]interface{}{"lines": lines})
 }

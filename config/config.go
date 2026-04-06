@@ -65,9 +65,10 @@ type Config struct {
 	MaxLatencyDegradation int // 降级模式超宽松延迟（默认5000ms）
 
 	// ========== 验证配置 ==========
-	ValidateConcurrency int    // 验证并发数（默认300）
-	ValidateTimeout     int    // 验证超时（秒）（默认8）
-	ValidateURL         string // 验证目标 URL
+	ValidateConcurrency  int      // 验证并发数（默认300）
+	ValidateTimeout      int      // 验证超时（秒）（默认8）
+	ValidateURL          string   // 主验证目标 URL
+	ValidateFallbackURLs []string // 通用回退验证目标 URL 列表
 
 	// ========== 健康检查配置 ==========
 	HealthCheckInterval    int // 状态监控间隔（分钟）（默认5）
@@ -113,6 +114,24 @@ var (
 	cfgMu     sync.RWMutex
 )
 
+func cloneStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	return append([]string(nil), values...)
+}
+
+func cloneConfig(cfg *Config) *Config {
+	if cfg == nil {
+		return nil
+	}
+	cloned := *cfg
+	cloned.BlockedCountries = cloneStrings(cfg.BlockedCountries)
+	cloned.AllowedCountries = cloneStrings(cfg.AllowedCountries)
+	cloned.ValidateFallbackURLs = cloneStrings(cfg.ValidateFallbackURLs)
+	return &cloned
+}
+
 func passwordHash(plain string) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(plain)))
 }
@@ -148,7 +167,7 @@ func DefaultConfig() *Config {
 	}
 
 	// 读取地理过滤配置
-	blockedCountries := []string{"CN"} // 默认屏蔽中国大陆
+	blockedCountries := []string{} // 通用代理池默认不过滤国家
 	if blockedEnv := os.Getenv("BLOCKED_COUNTRIES"); blockedEnv != "" {
 		// 支持逗号分隔的国家代码，如 "CN,RU,KP"
 		countries := strings.Split(blockedEnv, ",")
@@ -178,6 +197,29 @@ func DefaultConfig() *Config {
 	customProxyMode := os.Getenv("CUSTOM_PROXY_MODE")
 	if customProxyMode == "" {
 		customProxyMode = "mixed"
+	}
+	validateURL := strings.TrimSpace(os.Getenv("VALIDATE_URL"))
+	if validateURL == "" {
+		validateURL = "http://www.gstatic.com/generate_204"
+	}
+	validateFallbackURLs := []string{
+		"https://www.cloudflare.com/",
+		"https://www.github.com/",
+		"https://www.mozilla.org/",
+		"https://www.microsoft.com/",
+		"https://httpbin.org/ip",
+	}
+	if fallbackEnv := os.Getenv("VALIDATE_FALLBACK_URLS"); fallbackEnv != "" {
+		var parsed []string
+		for _, raw := range strings.Split(fallbackEnv, ",") {
+			raw = strings.TrimSpace(raw)
+			if raw != "" {
+				parsed = append(parsed, raw)
+			}
+		}
+		if len(parsed) > 0 {
+			validateFallbackURLs = parsed
+		}
 	}
 	singBoxPath := os.Getenv("SINGBOX_PATH")
 	if singBoxPath == "" {
@@ -216,9 +258,10 @@ func DefaultConfig() *Config {
 		MaxLatencyDegradation: 5000, // 降级5秒
 
 		// 验证配置
-		ValidateConcurrency: 300,
-		ValidateTimeout:     10, // 从8秒增加到10秒
-		ValidateURL:         "http://www.gstatic.com/generate_204",
+		ValidateConcurrency:  300,
+		ValidateTimeout:      10, // 从8秒增加到10秒
+		ValidateURL:          validateURL,
+		ValidateFallbackURLs: validateFallbackURLs,
 
 		// 健康检查配置
 		HealthCheckInterval:    5,  // 5分钟
@@ -293,6 +336,12 @@ func Load() *Config {
 			if saved.ValidateTimeout > 0 {
 				cfg.ValidateTimeout = saved.ValidateTimeout
 			}
+			if saved.ValidateURL != "" {
+				cfg.ValidateURL = saved.ValidateURL
+			}
+			if saved.ValidateFallbackURLs != nil {
+				cfg.ValidateFallbackURLs = saved.ValidateFallbackURLs
+			}
 
 			// 健康检查配置
 			if saved.HealthCheckInterval > 0 {
@@ -350,17 +399,18 @@ func Load() *Config {
 			}
 		}
 	}
+	snapshot := cloneConfig(cfg)
 	cfgMu.Lock()
-	globalCfg = cfg
+	globalCfg = snapshot
 	cfgMu.Unlock()
-	return cfg
+	return cloneConfig(snapshot)
 }
 
 // Get 获取当前配置
 func Get() *Config {
 	cfgMu.RLock()
 	defer cfgMu.RUnlock()
-	return globalCfg
+	return cloneConfig(globalCfg)
 }
 
 // savedConfig 持久化可调整的字段
@@ -376,8 +426,10 @@ type savedConfig struct {
 	MaxLatencyHealthy   int `json:"max_latency_healthy"`
 
 	// 验证配置
-	ValidateConcurrency int `json:"validate_concurrency"`
-	ValidateTimeout     int `json:"validate_timeout"`
+	ValidateConcurrency  int      `json:"validate_concurrency"`
+	ValidateTimeout      int      `json:"validate_timeout"`
+	ValidateURL          string   `json:"validate_url,omitempty"`
+	ValidateFallbackURLs []string `json:"validate_fallback_urls,omitempty"`
 
 	// 健康检查配置
 	HealthCheckInterval  int `json:"health_check_interval"`
@@ -407,36 +459,40 @@ type savedConfig struct {
 
 // Save 保存配置到文件，并更新内存配置
 func Save(cfg *Config) error {
+	snapshot := cloneConfig(cfg)
+
 	cfgMu.Lock()
-	*globalCfg = *cfg
+	globalCfg = snapshot
 	cfgMu.Unlock()
 
-	customPriority := cfg.CustomPriority
-	customFreePriority := cfg.CustomFreePriority
+	customPriority := snapshot.CustomPriority
+	customFreePriority := snapshot.CustomFreePriority
 	data, err := json.MarshalIndent(savedConfig{
-		PoolMaxSize:           cfg.PoolMaxSize,
-		PoolHTTPRatio:         cfg.PoolHTTPRatio,
-		PoolMinPerProtocol:    cfg.PoolMinPerProtocol,
-		MaxLatencyMs:          cfg.MaxLatencyMs,
-		MaxLatencyEmergency:   cfg.MaxLatencyEmergency,
-		MaxLatencyHealthy:     cfg.MaxLatencyHealthy,
-		ValidateConcurrency:   cfg.ValidateConcurrency,
-		ValidateTimeout:       cfg.ValidateTimeout,
-		HealthCheckInterval:   cfg.HealthCheckInterval,
-		HealthCheckBatchSize:  cfg.HealthCheckBatchSize,
-		OptimizeInterval:      cfg.OptimizeInterval,
-		ReplaceThreshold:      cfg.ReplaceThreshold,
-		BlockedCountries:      cfg.BlockedCountries,
-		AllowedCountries:      cfg.AllowedCountries,
-		CustomProxyMode:       cfg.CustomProxyMode,
+		PoolMaxSize:           snapshot.PoolMaxSize,
+		PoolHTTPRatio:         snapshot.PoolHTTPRatio,
+		PoolMinPerProtocol:    snapshot.PoolMinPerProtocol,
+		MaxLatencyMs:          snapshot.MaxLatencyMs,
+		MaxLatencyEmergency:   snapshot.MaxLatencyEmergency,
+		MaxLatencyHealthy:     snapshot.MaxLatencyHealthy,
+		ValidateConcurrency:   snapshot.ValidateConcurrency,
+		ValidateTimeout:       snapshot.ValidateTimeout,
+		ValidateURL:           snapshot.ValidateURL,
+		ValidateFallbackURLs:  snapshot.ValidateFallbackURLs,
+		HealthCheckInterval:   snapshot.HealthCheckInterval,
+		HealthCheckBatchSize:  snapshot.HealthCheckBatchSize,
+		OptimizeInterval:      snapshot.OptimizeInterval,
+		ReplaceThreshold:      snapshot.ReplaceThreshold,
+		BlockedCountries:      snapshot.BlockedCountries,
+		AllowedCountries:      snapshot.AllowedCountries,
+		CustomProxyMode:       snapshot.CustomProxyMode,
 		CustomPriority:        &customPriority,
 		CustomFreePriority:    &customFreePriority,
-		CustomProbeInterval:   cfg.CustomProbeInterval,
-		CustomRefreshInterval: cfg.CustomRefreshInterval,
-		SingBoxPath:           cfg.SingBoxPath,
-		SingBoxBasePort:       cfg.SingBoxBasePort,
-		FetchInterval:         cfg.FetchInterval,
-		CheckInterval:         cfg.CheckInterval,
+		CustomProbeInterval:   snapshot.CustomProbeInterval,
+		CustomRefreshInterval: snapshot.CustomRefreshInterval,
+		SingBoxPath:           snapshot.SingBoxPath,
+		SingBoxBasePort:       snapshot.SingBoxBasePort,
+		FetchInterval:         snapshot.FetchInterval,
+		CheckInterval:         snapshot.CheckInterval,
 	}, "", "  ")
 	if err != nil {
 		return err

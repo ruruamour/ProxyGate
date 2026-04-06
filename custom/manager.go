@@ -1,20 +1,17 @@
 package custom
 
 import (
-	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"golang.org/x/net/proxy"
 	"goproxy/config"
 	"goproxy/storage"
 	"goproxy/validator"
@@ -35,6 +32,11 @@ type Manager struct {
 	nodeCache map[int64][]ParsedNode
 	stopCh    chan struct{}
 	refreshMu sync.Mutex // 防止并发刷新
+}
+
+type preparedSubscription struct {
+	sub   storage.Subscription
+	nodes []ParsedNode
 }
 
 // NewManager 创建订阅管理器
@@ -122,7 +124,9 @@ func (m *Manager) checkAndRefresh() {
 		return
 	}
 
-	for _, sub := range subs {
+	var dueSubs []*storage.Subscription
+	for i := range subs {
+		sub := &subs[i]
 		if sub.Status != "active" {
 			continue
 		}
@@ -130,10 +134,26 @@ func (m *Manager) checkAndRefresh() {
 		if !sub.LastFetch.IsZero() && time.Since(sub.LastFetch) < time.Duration(sub.RefreshMin)*time.Minute {
 			continue
 		}
-		log.Printf("[custom] 🔄 订阅 [%s] 到期，开始刷新", sub.Name)
-		if err := m.RefreshSubscription(sub.ID); err != nil {
-			log.Printf("[custom] ❌ 订阅 [%s] 刷新失败: %v", sub.Name, err)
+		dueSubs = append(dueSubs, sub)
+	}
+
+	if len(dueSubs) == 0 {
+		return
+	}
+
+	for _, sub := range dueSubs {
+		log.Printf("[custom] 🔄 订阅 [%s] 到期，加入本轮批量刷新", sub.Name)
+	}
+
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+
+	pendingValidation := m.refreshSubscriptionsLocked(dueSubs, false)
+	for subID, proxies := range pendingValidation {
+		if len(proxies) == 0 {
+			continue
 		}
+		m.validateCustomProxies(proxies, subID)
 	}
 }
 
@@ -186,23 +206,17 @@ func (m *Manager) probeDisabled() {
 
 	log.Printf("[custom] 🔍 探测 %d 个禁用的订阅代理", len(disabled))
 
-	cfg := config.Get()
 	recovered := 0
 	recoveredSubs := make(map[int64]bool)
 	for _, proxy := range disabled {
 		valid, latency, exitIP, exitLocation := m.validator.ValidateOne(proxy)
 		if valid {
-			// 检查地理过滤：恢复前确认不在屏蔽列表中
-			if exitLocation != "" && isGeoBlocked(exitLocation, cfg) {
-				log.Printf("[custom] 代理 %s 验证通过但被地理过滤 (%s)，保持禁用", proxy.Address, exitLocation)
-				m.storage.UpdateExitInfo(proxy.Address, exitIP, exitLocation, int(latency.Milliseconds()))
-				continue
-			}
+			latencyMs := int(latency.Milliseconds())
 			m.storage.EnableProxy(proxy.Address)
-			m.storage.UpdateExitInfo(proxy.Address, exitIP, exitLocation, int(latency.Milliseconds()))
+			m.storage.UpdateExitInfo(proxy.Address, exitIP, exitLocation, latencyMs)
 			recovered++
 			recoveredSubs[proxy.SubscriptionID] = true
-			log.Printf("[custom] ✅ 代理 %s 恢复可用 (%dms)", proxy.Address, latency.Milliseconds())
+			log.Printf("[custom] ✅ 代理 %s 恢复可用 (%dms %s)", proxy.Address, latency.Milliseconds(), exitLocation)
 		}
 	}
 	// 有恢复的代理则更新对应订阅的 last_success
@@ -247,80 +261,21 @@ func (m *Manager) refreshSubscriptionLocked(subID int64) ([]storage.Proxy, error
 		return nil, nil
 	}
 
-	// 获取订阅内容
-	data, err := m.fetchSubscriptionData(sub)
+	plan, err := m.prepareActiveSubscriptionLocked(sub)
 	if err != nil {
-		return nil, fmt.Errorf("拉取订阅内容失败: %w", err)
+		return nil, err
 	}
-
-	// 解析节点
-	nodes, err := Parse(data, sub.Format)
-	if err != nil {
-		return nil, fmt.Errorf("解析订阅内容失败: %w", err)
-	}
-
-	if len(nodes) == 0 {
-		log.Printf("[custom] ⚠️ 订阅 [%s] 无有效节点", sub.Name)
+	if plan == nil {
 		return nil, nil
 	}
 
-	log.Printf("[custom] 订阅 [%s] 解析到 %d 个节点", sub.Name, len(nodes))
-	m.nodeCache[subID] = append([]ParsedNode(nil), nodes...)
-
-	// 先删除该订阅的旧代理
-	oldDeleted, _ := m.storage.DeleteBySubscriptionID(subID)
-	if oldDeleted > 0 {
-		log.Printf("[custom] 🧹 清理订阅 [%s] 旧代理 %d 个", sub.Name, oldDeleted)
-	}
-
-	// 分类节点
-	var directNodes []ParsedNode
-	var tunnelNodes []ParsedNode
-	for _, node := range nodes {
-		if node.IsDirect() {
-			directNodes = append(directNodes, node)
-		} else {
-			tunnelNodes = append(tunnelNodes, node)
-		}
-	}
-
-	// 收集所有入池的代理（带正确的协议信息）
-	var allProxies []storage.Proxy
-
-	// 处理可直接使用的 HTTP/SOCKS5 节点
-	for _, node := range directNodes {
-		addr := node.DirectAddress()
-		proto := node.DirectProtocol()
-		m.storage.AddProxyWithSource(addr, proto, "custom", subID)
-		allProxies = append(allProxies, storage.Proxy{Address: addr, Protocol: proto, Source: "custom"})
-	}
-	if len(directNodes) > 0 {
-		log.Printf("[custom] 📥 %d 个 HTTP/SOCKS5 节点直接入池", len(directNodes))
-	}
-
-	// 始终按当前所有活跃订阅重建 sing-box，避免删除/改配后残留旧节点。
+	reloadOK := true
 	if err := m.reloadAllTunnelNodesLocked(); err != nil {
 		log.Printf("[custom] ❌ sing-box 重载失败: %v", err)
-	} else {
-		portMap := m.singbox.GetPortMap()
-		for _, node := range tunnelNodes {
-			key := node.NodeKey()
-			if port, ok := portMap[key]; ok {
-				addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
-				m.storage.AddProxyWithSource(addr, "socks5", "custom", subID)
-				allProxies = append(allProxies, storage.Proxy{Address: addr, Protocol: "socks5", Source: "custom"})
-			}
-		}
-		if len(tunnelNodes) > 0 {
-			log.Printf("[custom] 📥 %d 个加密节点通过 sing-box 转换入池", len(tunnelNodes))
-		}
+		reloadOK = false
 	}
 
-	// 更新订阅信息（记录实际入池的代理数）
-	m.storage.UpdateSubscriptionFetch(subID, len(allProxies))
-	log.Printf("[custom] ✅ 订阅 [%s] 刷新完成，解析 %d 节点，入池 %d 个", sub.Name, len(nodes), len(allProxies))
-
-	return allProxies, nil
+	return m.applyPreparedSubscriptionLocked(plan, reloadOK), nil
 }
 
 // RefreshAll 刷新所有活跃订阅
@@ -336,12 +291,14 @@ func (m *Manager) RefreshAll() {
 
 	liveSubs := make(map[int64]bool, len(subs))
 	activeCount := 0
+	reloadNeeded := false
 	for _, sub := range subs {
 		liveSubs[sub.ID] = true
 		if sub.Status != "active" {
 			delete(m.nodeCache, sub.ID)
 			if deleted, _ := m.storage.DeleteBySubscriptionID(sub.ID); deleted > 0 {
 				log.Printf("[custom] 🧹 清理非活跃订阅 [%s] 代理 %d 个", sub.Name, deleted)
+				reloadNeeded = true
 			}
 			continue
 		}
@@ -363,24 +320,139 @@ func (m *Manager) RefreshAll() {
 		return
 	}
 
-	pendingValidation := make(map[int64][]storage.Proxy, activeCount)
+	activeSubs := make([]*storage.Subscription, 0, activeCount)
 	for _, sub := range subs {
 		if sub.Status != "active" {
 			continue
 		}
-		proxies, err := m.refreshSubscriptionLocked(sub.ID)
-		if err != nil {
-			log.Printf("[custom] ❌ 订阅 [%s] 刷新失败: %v", sub.Name, err)
-			continue
-		}
-		pendingValidation[sub.ID] = proxies
+		subCopy := sub
+		activeSubs = append(activeSubs, &subCopy)
 	}
+
+	pendingValidation := m.refreshSubscriptionsLocked(activeSubs, reloadNeeded)
 	for subID, proxies := range pendingValidation {
 		if len(proxies) == 0 {
 			continue
 		}
 		m.validateCustomProxies(proxies, subID)
 	}
+}
+
+func (m *Manager) refreshSubscriptionsLocked(subs []*storage.Subscription, forceReload bool) map[int64][]storage.Proxy {
+	pendingValidation := make(map[int64][]storage.Proxy, len(subs))
+	prepared := make(map[int64]*preparedSubscription, len(subs))
+	reloadNeeded := forceReload
+
+	for _, sub := range subs {
+		if sub == nil || sub.Status != "active" {
+			continue
+		}
+		plan, err := m.prepareActiveSubscriptionLocked(sub)
+		if err != nil {
+			log.Printf("[custom] ❌ 订阅 [%s] 刷新失败: %v", sub.Name, err)
+			continue
+		}
+		if plan == nil {
+			continue
+		}
+		prepared[sub.ID] = plan
+		reloadNeeded = true
+	}
+
+	reloadOK := true
+	if reloadNeeded {
+		if err := m.reloadAllTunnelNodesLocked(); err != nil {
+			log.Printf("[custom] ❌ sing-box 重载失败: %v", err)
+			reloadOK = false
+		}
+	}
+
+	for subID, plan := range prepared {
+		pendingValidation[subID] = m.applyPreparedSubscriptionLocked(plan, reloadOK)
+	}
+
+	return pendingValidation
+}
+
+func (m *Manager) prepareActiveSubscriptionLocked(sub *storage.Subscription) (*preparedSubscription, error) {
+	data, err := m.fetchSubscriptionData(sub)
+	if err != nil {
+		return nil, fmt.Errorf("拉取订阅内容失败: %w", err)
+	}
+
+	nodes, err := Parse(data, sub.Format)
+	if err != nil {
+		return nil, fmt.Errorf("解析订阅内容失败: %w", err)
+	}
+
+	if len(nodes) == 0 {
+		log.Printf("[custom] ⚠️ 订阅 [%s] 无有效节点", sub.Name)
+		return nil, nil
+	}
+
+	log.Printf("[custom] 订阅 [%s] 解析到 %d 个节点", sub.Name, len(nodes))
+	m.nodeCache[sub.ID] = append([]ParsedNode(nil), nodes...)
+
+	return &preparedSubscription{
+		sub:   *sub,
+		nodes: append([]ParsedNode(nil), nodes...),
+	}, nil
+}
+
+func (m *Manager) applyPreparedSubscriptionLocked(plan *preparedSubscription, reloadOK bool) []storage.Proxy {
+	if plan == nil {
+		return nil
+	}
+
+	sub := plan.sub
+	nodes := plan.nodes
+
+	oldDeleted, _ := m.storage.DeleteBySubscriptionID(sub.ID)
+	if oldDeleted > 0 {
+		log.Printf("[custom] 🧹 清理订阅 [%s] 旧代理 %d 个", sub.Name, oldDeleted)
+	}
+
+	var directNodes []ParsedNode
+	var tunnelNodes []ParsedNode
+	for _, node := range nodes {
+		if node.IsDirect() {
+			directNodes = append(directNodes, node)
+		} else {
+			tunnelNodes = append(tunnelNodes, node)
+		}
+	}
+
+	var allProxies []storage.Proxy
+	for _, node := range directNodes {
+		addr := node.DirectAddress()
+		proto := node.DirectProtocol()
+		m.storage.AddProxyWithSource(addr, proto, "custom", sub.ID)
+		allProxies = append(allProxies, storage.Proxy{Address: addr, Protocol: proto, Source: "custom"})
+	}
+	if len(directNodes) > 0 {
+		log.Printf("[custom] 📥 %d 个 HTTP/SOCKS5 节点直接入池", len(directNodes))
+	}
+
+	if reloadOK {
+		portMap := m.singbox.GetPortMap()
+		for _, node := range tunnelNodes {
+			key := node.NodeKey()
+			if port, ok := portMap[key]; ok {
+				addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+				m.storage.AddProxyWithSource(addr, "socks5", "custom", sub.ID)
+				allProxies = append(allProxies, storage.Proxy{Address: addr, Protocol: "socks5", Source: "custom"})
+			}
+		}
+		if len(tunnelNodes) > 0 {
+			log.Printf("[custom] 📥 %d 个加密节点通过 sing-box 转换入池", len(tunnelNodes))
+		}
+	} else if len(tunnelNodes) > 0 {
+		log.Printf("[custom] ⚠️ 订阅 [%s] 的 %d 个隧道节点本轮未入池（sing-box 未就绪）", sub.Name, len(tunnelNodes))
+	}
+
+	m.storage.UpdateSubscriptionFetch(sub.ID, len(allProxies))
+	log.Printf("[custom] ✅ 订阅 [%s] 刷新完成，解析 %d 节点，入池 %d 个", sub.Name, len(nodes), len(allProxies))
+	return allProxies
 }
 
 func (m *Manager) reloadAllTunnelNodesLocked() error {
@@ -433,56 +505,15 @@ func (m *Manager) fetchSubscriptionData(sub *storage.Subscription) ([]byte, erro
 	return data, nil
 }
 
-// fetchWithRetry 尝试拉取 URL（直连 → 代理，多种方式）
+// fetchWithRetry 使用多个常见 User-Agent 直连拉取订阅。
+// 订阅 URL 往往携带 token，绝不能转交给池内代理，避免泄露认证信息。
 func (m *Manager) fetchWithRetry(urlStr string) ([]byte, error) {
-	// 先尝试直连
-	data, err := m.fetchURL(urlStr, nil)
-	if err == nil {
-		return data, nil
-	}
-	log.Printf("[custom] 直连订阅 URL 失败: %v，尝试通过代理访问...", err)
-
-	// 直连失败，尝试通过池中已有代理访问
-	for i := 0; i < 3; i++ {
-		p, pErr := m.storage.GetRandom()
-		if pErr != nil {
-			break
-		}
-		data, err = m.fetchURL(urlStr, p)
-		if err == nil {
-			log.Printf("[custom] ✅ 通过代理 %s 成功访问订阅 URL", p.Address)
-			return data, nil
-		}
-		log.Printf("[custom] 代理 %s 访问订阅 URL 失败: %v", p.Address, err)
-	}
-
-	return nil, fmt.Errorf("直连和代理均无法访问订阅 URL: %w", err)
+	return m.fetchURL(urlStr)
 }
 
-// fetchURL 通过指定代理（或直连）拉取 URL 内容
-func (m *Manager) fetchURL(urlStr string, p *storage.Proxy) ([]byte, error) {
+// fetchURL 直连拉取 URL 内容。
+func (m *Manager) fetchURL(urlStr string) ([]byte, error) {
 	transport := &http.Transport{}
-
-	if p != nil {
-		// 通过代理访问时跳过 TLS 验证（免费代理可能 MITM）
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-
-		switch p.Protocol {
-		case "socks5":
-			dialer, err := proxy.SOCKS5("tcp", p.Address, nil, proxy.Direct)
-			if err != nil {
-				return nil, err
-			}
-			transport.Dial = dialer.Dial
-		default: // http
-			proxyURL, err := url.Parse(fmt.Sprintf("http://%s", p.Address))
-			if err != nil {
-				return nil, err
-			}
-			transport.Proxy = http.ProxyURL(proxyURL)
-		}
-	}
-
 	client := &http.Client{Timeout: 30 * time.Second, Transport: transport}
 	var lastErr error
 	for _, ua := range subscriptionUserAgents {
@@ -530,21 +561,14 @@ func (m *Manager) validateCustomProxies(proxies []storage.Proxy, subID int64) in
 
 	log.Printf("[custom] 🔍 开始验证 %d 个订阅代理", len(proxies))
 
-	cfg := config.Get()
 	resultCh := m.validator.ValidateStream(proxies)
 	valid, invalid := 0, 0
 	for result := range resultCh {
 		if result.Valid {
 			latencyMs := int(result.Latency.Milliseconds())
 			m.storage.UpdateExitInfo(result.Proxy.Address, result.ExitIP, result.ExitLocation, latencyMs)
-			// 检查地理过滤
-			if result.ExitLocation != "" && isGeoBlocked(result.ExitLocation, cfg) {
-				m.storage.DisableProxy(result.Proxy.Address)
-				invalid++
-			} else {
-				m.storage.EnableProxy(result.Proxy.Address)
-				valid++
-			}
+			m.storage.EnableProxy(result.Proxy.Address)
+			valid++
 		} else {
 			invalid++
 			m.storage.DisableProxy(result.Proxy.Address)
@@ -559,7 +583,6 @@ func (m *Manager) validateCustomProxies(proxies []storage.Proxy, subID int64) in
 	log.Printf("[custom] 验证完成：%d 可用，%d 不可用", valid, invalid)
 	return valid
 }
-
 // GetStatus 获取订阅管理器状态
 func (m *Manager) GetStatus() map[string]interface{} {
 	customCount, _ := m.storage.CountBySource("custom")
@@ -603,32 +626,6 @@ func (m *Manager) ValidateSubscription(url, filePath string) (int, error) {
 	}
 
 	return len(nodes), nil
-}
-
-// isGeoBlocked 检查代理出口位置是否被地理过滤
-func isGeoBlocked(exitLocation string, cfg *config.Config) bool {
-	if exitLocation == "" || len(exitLocation) < 2 {
-		return false
-	}
-	countryCode := exitLocation[:2]
-
-	// 白名单模式优先
-	if len(cfg.AllowedCountries) > 0 {
-		for _, allowed := range cfg.AllowedCountries {
-			if countryCode == allowed {
-				return false
-			}
-		}
-		return true // 不在白名单中
-	}
-
-	// 黑名单模式
-	for _, blocked := range cfg.BlockedCountries {
-		if countryCode == blocked {
-			return true
-		}
-	}
-	return false
 }
 
 // GetSingBox 获取 sing-box 进程管理器

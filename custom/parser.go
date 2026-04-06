@@ -9,7 +9,6 @@ import (
 	"log"
 	"net"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 
@@ -229,18 +228,13 @@ func extractProxiesFromNode(doc *yaml.Node) []map[string]interface{} {
 	for i := 0; i < len(root.Content)-1; i += 2 {
 		keyNode := root.Content[i]
 		valNode := root.Content[i+1]
-		if keyNode.Value == "proxies" || keyNode.Value == "Proxy" {
-			log.Printf("[custom] 找到 %s 字段: kind=%d tag=%s 子节点数=%d",
-				keyNode.Value, valNode.Kind, valNode.Tag, len(valNode.Content))
+			if keyNode.Value == "proxies" || keyNode.Value == "Proxy" {
+				log.Printf("[custom] 找到 %s 字段: kind=%d tag=%s 子节点数=%d",
+					keyNode.Value, valNode.Kind, valNode.Tag, len(valNode.Content))
 
-			// 把 proxies 段的原始 YAML 写到临时文件方便调试
-			debugData, _ := yaml.Marshal(valNode)
-			os.WriteFile("/tmp/goproxy_debug_proxies.yaml", debugData, 0644)
-			log.Printf("[custom] 调试: proxies 原始数据已写入 /tmp/goproxy_debug_proxies.yaml (%d bytes)", len(debugData))
-
-			if valNode.Kind != yaml.SequenceNode {
-				log.Printf("[custom] proxies 字段不是列表（kind=%d tag=%s）", valNode.Kind, valNode.Tag)
-				return nil
+				if valNode.Kind != yaml.SequenceNode {
+					log.Printf("[custom] proxies 字段不是列表（kind=%d tag=%s）", valNode.Kind, valNode.Tag)
+					return nil
 			}
 			// 每个 item 是一个 MappingNode，解码为 map
 			var proxies []map[string]interface{}

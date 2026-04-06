@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"math/rand"
 	"os"
 	"os/signal"
 	"sync"
@@ -24,6 +25,16 @@ import (
 )
 
 var fetchRunning atomic.Bool
+
+const maxHTTPProbeConcurrency = 96
+const (
+	refillCandidateMin          = 256
+	refillCandidateMax          = 1536
+	refillShortageMultiplier    = 64
+	emergencyCandidateMin       = 512
+	emergencyCandidateMax       = 3072
+	emergencyShortageMultiplier = 96
+)
 
 func main() {
 	// 初始化日志收集器
@@ -69,30 +80,6 @@ func main() {
 	healthChecker := checker.NewHealthChecker(store, validate, cfg, poolMgr)
 	opt := optimizer.NewOptimizer(store, fetch, validate, poolMgr, cfg)
 
-	// 清理无效代理（免费代理删除，订阅代理禁用）
-	totalDeleted := 0
-	if len(cfg.AllowedCountries) > 0 {
-		if deleted, err := store.DeleteNotAllowedCountries(cfg.AllowedCountries); err == nil && deleted > 0 {
-			log.Printf("[main] 🧹 已清理 %d 个非白名单免费代理 (允许: %v)", deleted, cfg.AllowedCountries)
-			totalDeleted += int(deleted)
-		}
-		if disabled, err := store.DisableNotAllowedCountries(cfg.AllowedCountries); err == nil && disabled > 0 {
-			log.Printf("[main] 🔒 已禁用 %d 个非白名单订阅代理", disabled)
-		}
-	} else if len(cfg.BlockedCountries) > 0 {
-		if deleted, err := store.DeleteBlockedCountries(cfg.BlockedCountries); err == nil && deleted > 0 {
-			log.Printf("[main] 🧹 已清理 %d 个屏蔽国家免费代理 (屏蔽: %v)", deleted, cfg.BlockedCountries)
-			totalDeleted += int(deleted)
-		}
-		if disabled, err := store.DisableBlockedCountries(cfg.BlockedCountries); err == nil && disabled > 0 {
-			log.Printf("[main] 🔒 已禁用 %d 个屏蔽国家订阅代理", disabled)
-		}
-	}
-	if deleted, err := store.DeleteWithoutExitInfo(); err == nil && deleted > 0 {
-		log.Printf("[main] 🧹 已清理 %d 个无出口信息的代理", deleted)
-		totalDeleted += int(deleted)
-	}
-
 	// 创建 HTTP 代理服务器：随机轮换 + 最低延迟
 	sessionMgr := proxy.NewSessionManager()
 	randomServer := proxy.New(store, cfg, sessionMgr, "random", cfg.ProxyPort)
@@ -126,11 +113,7 @@ func main() {
 
 	// 首次智能填充（清理后立即触发）
 	go func() {
-		if totalDeleted > 0 {
-			log.Printf("[main] 🚀 清理后立即启动补充填充...")
-		} else {
-			log.Println("[main] 🚀 启动初始化填充...")
-		}
+		log.Println("[main] 🚀 启动初始化填充...")
 		smartFetchAndFill(fetch, validate, store, poolMgr)
 	}()
 
@@ -176,6 +159,90 @@ func main() {
 	}
 }
 
+func cappedHTTPProbeConcurrency(total int) int {
+	if total <= 0 {
+		return 1
+	}
+	if total > maxHTTPProbeConcurrency {
+		return maxHTTPProbeConcurrency
+	}
+	return total
+}
+
+func protocolShortage(status *pool.PoolStatus, protocol string) int {
+	if status == nil {
+		return 0
+	}
+
+	switch protocol {
+	case "http":
+		if missing := status.HTTPSlots - status.HTTP; missing > 0 {
+			return missing
+		}
+	case "socks5":
+		if missing := status.SOCKS5Slots - status.SOCKS5; missing > 0 {
+			return missing
+		}
+	}
+
+	return 0
+}
+
+func candidateBudget(mode string, shortage int) int {
+	if shortage <= 0 {
+		return 0
+	}
+
+	switch mode {
+	case "refill":
+		budget := shortage * refillShortageMultiplier
+		if budget < refillCandidateMin {
+			budget = refillCandidateMin
+		}
+		if budget > refillCandidateMax {
+			budget = refillCandidateMax
+		}
+		return budget
+	case "emergency":
+		budget := shortage * emergencyShortageMultiplier
+		if budget < emergencyCandidateMin {
+			budget = emergencyCandidateMin
+		}
+		if budget > emergencyCandidateMax {
+			budget = emergencyCandidateMax
+		}
+		return budget
+	default:
+		return 0
+	}
+}
+
+func limitCandidatesForProtocol(mode string, status *pool.PoolStatus, protocol string, candidates []storage.Proxy) []storage.Proxy {
+	if len(candidates) == 0 {
+		return nil
+	}
+	if mode != "refill" && mode != "emergency" {
+		return candidates
+	}
+
+	shortage := protocolShortage(status, protocol)
+	if shortage <= 0 {
+		return nil
+	}
+
+	budget := candidateBudget(mode, shortage)
+	if budget <= 0 || len(candidates) <= budget {
+		return candidates
+	}
+
+	limited := append([]storage.Proxy(nil), candidates...)
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	rng.Shuffle(len(limited), func(i, j int) {
+		limited[i], limited[j] = limited[j], limited[i]
+	})
+	return limited[:budget]
+}
+
 // smartFetchAndFill 智能抓取和填充
 func smartFetchAndFill(fetch *fetcher.Fetcher, validate *validator.Validator, store *storage.Storage, poolMgr *pool.Manager) {
 	// 防止并发执行
@@ -185,7 +252,8 @@ func smartFetchAndFill(fetch *fetcher.Fetcher, validate *validator.Validator, st
 	}
 	defer fetchRunning.Store(false)
 	currentCfg := config.Get()
-	validateRunner := validator.New(currentCfg.ValidateConcurrency, currentCfg.ValidateTimeout, currentCfg.ValidateURL)
+	httpProbeConcurrency := 0
+	socks5ProbeConcurrency := 0
 
 	// 获取池子状态
 	status, err := poolMgr.GetStatus()
@@ -224,15 +292,43 @@ func smartFetchAndFill(fetch *fetcher.Fetcher, validate *validator.Validator, st
 		}
 	}
 
-	log.Printf("[main] 抓取到 %d 个候选代理（SOCKS5=%d HTTP=%d），按协议并发验证...",
-		len(candidates), len(socks5Candidates), len(httpCandidates))
+	rawHTTPCount := len(httpCandidates)
+	rawSOCKS5Count := len(socks5Candidates)
+	httpCandidates = limitCandidatesForProtocol(mode, status, "http", httpCandidates)
+	socks5Candidates = limitCandidatesForProtocol(mode, status, "socks5", socks5Candidates)
+	scheduledCount := len(httpCandidates) + len(socks5Candidates)
+	if scheduledCount == 0 {
+		log.Printf("[main] 当前没有需要补位的候选协议，跳过本轮验证（模式=%s）", mode)
+		return
+	}
+	if rawHTTPCount != len(httpCandidates) {
+		log.Printf("[main] HTTP 候选按缺口限流: %d -> %d", rawHTTPCount, len(httpCandidates))
+	}
+	if rawSOCKS5Count != len(socks5Candidates) {
+		log.Printf("[main] SOCKS5 候选按缺口限流: %d -> %d", rawSOCKS5Count, len(socks5Candidates))
+	}
+	log.Printf("[main] 抓取到 %d 个候选代理（SOCKS5=%d HTTP=%d），本轮验证 %d 个（SOCKS5=%d HTTP=%d）...",
+		len(candidates), rawSOCKS5Count, rawHTTPCount, scheduledCount, len(socks5Candidates), len(httpCandidates))
+
+	switch {
+	case len(httpCandidates) > 0 && len(socks5Candidates) > 0:
+		httpProbeConcurrency = cappedHTTPProbeConcurrency(currentCfg.ValidateConcurrency / 2)
+		socks5ProbeConcurrency = currentCfg.ValidateConcurrency - httpProbeConcurrency
+		if socks5ProbeConcurrency < 1 {
+			socks5ProbeConcurrency = 1
+		}
+	case len(httpCandidates) > 0:
+		httpProbeConcurrency = cappedHTTPProbeConcurrency(currentCfg.ValidateConcurrency)
+	case len(socks5Candidates) > 0:
+		socks5ProbeConcurrency = currentCfg.ValidateConcurrency
+	}
+
+	log.Printf("[main] 验证并发预算: total=%d http=%d socks5=%d",
+		currentCfg.ValidateConcurrency, httpProbeConcurrency, socks5ProbeConcurrency)
 
 	// 共享计数器
 	var addedCount atomic.Int32
 	var validCount atomic.Int32
-	var rejectedNoExit atomic.Int32
-	var rejectedLatency atomic.Int32
-	var rejectedGeo atomic.Int32
 	var rejectedFull atomic.Int32
 
 	// 入池处理函数（两个协程共用）
@@ -243,25 +339,20 @@ func smartFetchAndFill(fetch *fetcher.Fetcher, validate *validator.Validator, st
 
 		validCount.Add(1)
 		latencyMs := int(result.Latency.Milliseconds())
-
-		cfg := config.Get()
-		maxLatency := cfg.GetLatencyThreshold(status.State)
-
-		if result.ExitIP == "" || result.ExitLocation == "" {
-			rejectedNoExit.Add(1)
-			return
+		exitIP := result.ExitIP
+		if exitIP == "" {
+			exitIP = "UNKNOWN"
 		}
-
-		if latencyMs > maxLatency {
-			rejectedLatency.Add(1)
-			return
+		exitLocation := result.ExitLocation
+		if exitLocation == "" {
+			exitLocation = "UNKNOWN"
 		}
 
 		proxyToAdd := storage.Proxy{
 			Address:      result.Proxy.Address,
 			Protocol:     result.Proxy.Protocol,
-			ExitIP:       result.ExitIP,
-			ExitLocation: result.ExitLocation,
+			ExitIP:       exitIP,
+			ExitLocation: exitLocation,
 			Latency:      latencyMs,
 		}
 
@@ -269,14 +360,6 @@ func smartFetchAndFill(fetch *fetcher.Fetcher, validate *validator.Validator, st
 			addedCount.Add(1)
 		} else if reason == "slots_full" {
 			rejectedFull.Add(1)
-		} else if len(result.ExitLocation) >= 2 {
-			countryCode := result.ExitLocation[:2]
-			for _, blocked := range cfg.BlockedCountries {
-				if countryCode == blocked {
-					rejectedGeo.Add(1)
-					break
-				}
-			}
 		}
 	}
 
@@ -293,12 +376,13 @@ func smartFetchAndFill(fetch *fetcher.Fetcher, validate *validator.Validator, st
 
 	// SOCKS5 协程：验证快，优先填充
 	if len(socks5Candidates) > 0 {
+		socks5Validator := validator.New(socks5ProbeConcurrency, currentCfg.ValidateTimeout, currentCfg.ValidateURL)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			count := 0
 			stopped := false
-			for result := range validateRunner.ValidateStreamContext(ctx, socks5Candidates) {
+			for result := range socks5Validator.ValidateStreamContext(ctx, socks5Candidates) {
 				if stopped {
 					continue
 				}
@@ -316,12 +400,13 @@ func smartFetchAndFill(fetch *fetcher.Fetcher, validate *validator.Validator, st
 
 	// HTTP 协程：有额外 HTTPS 检测，较慢
 	if len(httpCandidates) > 0 {
+		httpValidator := validator.New(httpProbeConcurrency, currentCfg.ValidateTimeout, currentCfg.ValidateURL)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			count := 0
 			stopped := false
-			for result := range validateRunner.ValidateStreamContext(ctx, httpCandidates) {
+			for result := range httpValidator.ValidateStreamContext(ctx, httpCandidates) {
 				if stopped {
 					continue
 				}
@@ -341,9 +426,9 @@ func smartFetchAndFill(fetch *fetcher.Fetcher, validate *validator.Validator, st
 
 	// 最终状态
 	finalStatus, _ := poolMgr.GetStatus()
-	log.Printf("[main] 填充完成: 验证%d 通过%d 入池%d | 拒绝[无出口:%d 延迟:%d 地理:%d 满:%d] | 最终: %s HTTP=%d SOCKS5=%d",
-		len(candidates), validCount.Load(), addedCount.Load(),
-		rejectedNoExit.Load(), rejectedLatency.Load(), rejectedGeo.Load(), rejectedFull.Load(),
+	log.Printf("[main] 填充完成: 验证%d 通过%d 入池%d | 拒绝[满:%d] | 最终: %s HTTP=%d SOCKS5=%d",
+		scheduledCount, validCount.Load(), addedCount.Load(),
+		rejectedFull.Load(),
 		finalStatus.State, finalStatus.HTTP, finalStatus.SOCKS5)
 }
 

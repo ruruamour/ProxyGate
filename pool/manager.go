@@ -20,6 +20,13 @@ func NewManager(s *storage.Storage, cfg *config.Config) *Manager {
 	}
 }
 
+func (m *Manager) currentConfig() *config.Config {
+	if cfg := config.Get(); cfg != nil {
+		return cfg
+	}
+	return m.cfg
+}
+
 // PoolStatus 池子状态
 type PoolStatus struct {
 	Total            int
@@ -35,16 +42,17 @@ type PoolStatus struct {
 
 // GetStatus 获取当前池子状态
 func (m *Manager) GetStatus() (*PoolStatus, error) {
+	cfg := m.currentConfig()
 	total, _ := m.storage.Count()
 	httpCount, _ := m.storage.CountByProtocol("http")
 	socks5Count, _ := m.storage.CountByProtocol("socks5")
-	if m.cfg.CustomProxyMode != "free_only" {
+	if cfg.CustomProxyMode != "free_only" {
 		total, _ = m.storage.CountAll()
 		httpCount, _ = m.storage.CountByProtocolAll("http")
 		socks5Count, _ = m.storage.CountByProtocolAll("socks5")
 	}
 
-	httpSlots, socks5Slots := m.cfg.CalculateSlots()
+	httpSlots, socks5Slots := cfg.CalculateSlots()
 
 	// 计算平均延迟
 	avgHTTP, _ := m.storage.GetAverageLatency("http")
@@ -70,7 +78,8 @@ func (m *Manager) GetStatus() (*PoolStatus, error) {
 
 // determineState 判断池子状态
 func (m *Manager) determineState(total, httpCount, socks5Count int) string {
-	httpSlots, socks5Slots := m.cfg.CalculateSlots()
+	cfg := m.currentConfig()
+	httpSlots, socks5Slots := cfg.CalculateSlots()
 
 	// 单协议缺失
 	if httpCount == 0 || socks5Count == 0 {
@@ -78,7 +87,7 @@ func (m *Manager) determineState(total, httpCount, socks5Count int) string {
 	}
 
 	// 紧急：总数<10%
-	emergencyThreshold := int(float64(m.cfg.PoolMaxSize) * 0.1)
+	emergencyThreshold := int(float64(cfg.PoolMaxSize) * 0.1)
 	if total < emergencyThreshold {
 		return "emergency"
 	}
@@ -88,8 +97,13 @@ func (m *Manager) determineState(total, httpCount, socks5Count int) string {
 		return "critical"
 	}
 
+	// 警告：任一协议<50%槽位。总量够但结构失衡时，也必须补位。
+	if httpCount < int(float64(httpSlots)*0.5) || socks5Count < int(float64(socks5Slots)*0.5) {
+		return "warning"
+	}
+
 	// 警告：总数<95%
-	healthyThreshold := int(float64(m.cfg.PoolMaxSize) * 0.95)
+	healthyThreshold := int(float64(cfg.PoolMaxSize) * 0.95)
 	if total < healthyThreshold {
 		return "warning"
 	}
@@ -100,6 +114,12 @@ func (m *Manager) determineState(total, httpCount, socks5Count int) string {
 
 // NeedsFetch 判断是否需要抓取以及抓取模式
 func (m *Manager) NeedsFetch(status *PoolStatus) (bool, string, string) {
+	cfg := m.currentConfig()
+	// custom_only 模式必须保持“只消费订阅代理”的语义，不能回填免费代理。
+	if cfg.CustomProxyMode == "custom_only" {
+		return false, "", ""
+	}
+
 	// 单协议缺失：紧急模式，指定协议
 	if status.HTTP == 0 {
 		return true, "emergency", "http"
@@ -155,7 +175,8 @@ func (m *Manager) TryAddProxy(p storage.Proxy) (bool, string) {
 		return true, "added_custom"
 	}
 
-	httpSlots, socks5Slots := m.cfg.CalculateSlots()
+	cfg := m.currentConfig()
+	httpSlots, socks5Slots := cfg.CalculateSlots()
 	httpCount, _ := m.storage.CountByProtocol("http")
 	socks5Count, _ := m.storage.CountByProtocol("socks5")
 	total, _ := m.storage.Count()
@@ -184,7 +205,7 @@ func (m *Manager) TryAddProxy(p storage.Proxy) (bool, string) {
 
 	// 情况2：槽位满，但允许10%浮动
 	allowedFloat := int(float64(maxSlots) * 0.1)
-	if total < m.cfg.PoolMaxSize && currentCount < maxSlots+allowedFloat {
+	if total < cfg.PoolMaxSize && currentCount < maxSlots+allowedFloat {
 		if err := m.storage.AddProxy(p.Address, p.Protocol); err != nil {
 			return false, "db_error"
 		}
@@ -195,7 +216,7 @@ func (m *Manager) TryAddProxy(p storage.Proxy) (bool, string) {
 	}
 
 	// 情况3：池子满了，尝试替换
-	if currentCount >= maxSlots || total >= m.cfg.PoolMaxSize {
+	if currentCount >= maxSlots || total >= cfg.PoolMaxSize {
 		return m.tryReplace(p)
 	}
 
@@ -213,7 +234,7 @@ func (m *Manager) tryReplace(newProxy storage.Proxy) (bool, string) {
 	worst := candidates[0]
 
 	// 判断是否值得替换：新代理需要显著更快
-	threshold := m.cfg.ReplaceThreshold
+	threshold := m.currentConfig().ReplaceThreshold
 	if float64(newProxy.Latency) < float64(worst.Latency)*threshold {
 		if err := m.storage.ReplaceProxy(worst.Address, newProxy); err != nil {
 			return false, "replace_error"
@@ -229,12 +250,13 @@ func (m *Manager) tryReplace(newProxy storage.Proxy) (bool, string) {
 
 // AdjustForConfigChange 配置变更后调整池子
 func (m *Manager) AdjustForConfigChange(oldSize int, oldRatio float64) {
-	newHTTP, newSOCKS5 := m.cfg.CalculateSlots()
+	cfg := m.currentConfig()
+	newHTTP, newSOCKS5 := cfg.CalculateSlots()
 	oldHTTP := int(float64(oldSize) * oldRatio)
 	oldSOCKS5 := oldSize - oldHTTP
 
 	log.Printf("[pool] 配置变更: 容量 %d→%d, HTTP槽位 %d→%d, SOCKS5槽位 %d→%d",
-		oldSize, m.cfg.PoolMaxSize, oldHTTP, newHTTP, oldSOCKS5, newSOCKS5)
+		oldSize, cfg.PoolMaxSize, oldHTTP, newHTTP, oldSOCKS5, newSOCKS5)
 
 	// 如果槽位减少且当前超标，标记超标的为替换候选
 	httpCount, _ := m.storage.CountByProtocol("http")

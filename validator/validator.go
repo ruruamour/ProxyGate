@@ -2,26 +2,27 @@ package validator
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
-	"golang.org/x/net/proxy"
 	"goproxy/config"
+	"goproxy/fetcher"
 	"goproxy/storage"
 )
 
+const exitInfoTimeoutCap = 4 * time.Second
+
 type Validator struct {
-	concurrency   int
-	timeout       time.Duration
-	validateURL   string
-	maxResponseMs int
-	cfg           *config.Config
+	concurrency int
+	timeout     time.Duration
+	validateURL string
+	cfg         *config.Config
 }
 
 func concurrencyBuffer(total, concurrency int) int {
@@ -32,17 +33,11 @@ func concurrencyBuffer(total, concurrency int) int {
 }
 
 func New(concurrency, timeoutSec int, validateURL string) *Validator {
-	cfg := config.Get()
-	maxMs := 0
-	if cfg != nil {
-		maxMs = cfg.MaxResponseMs
-	}
 	return &Validator{
-		concurrency:   concurrency,
-		timeout:       time.Duration(timeoutSec) * time.Second,
-		validateURL:   validateURL,
-		maxResponseMs: maxMs,
-		cfg:           cfg,
+		concurrency: concurrency,
+		timeout:     time.Duration(timeoutSec) * time.Second,
+		validateURL: validateURL,
+		cfg:         config.Get(),
 	}
 }
 
@@ -54,42 +49,13 @@ type Result struct {
 	ExitLocation string
 }
 
-// getExitIPInfo 通过代理获取出口 IP 和地理位置
-func getExitIPInfo(client *http.Client) (string, string) {
-	// 使用 ip-api.com 返回 JSON 格式的 IP 信息
-	resp, err := client.Get("http://ip-api.com/json/?fields=status,country,countryCode,city,query")
-	if err != nil {
-		return "", ""
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		Status      string `json:"status"`
-		Query       string `json:"query"` // IP 地址
-		Country     string `json:"country"`
-		CountryCode string `json:"countryCode"`
-		City        string `json:"city"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || result.Status != "success" {
-		return "", ""
-	}
-
-	// 返回格式：IP, "国家代码 城市"
-	location := result.CountryCode
-	if result.City != "" {
-		location = fmt.Sprintf("%s %s", result.CountryCode, result.City)
-	}
-
-	return result.Query, location
-}
-
 // HTTPS 测试目标列表，随机选一个验证代理的 CONNECT 隧道能力
 var httpsTestTargets = []string{
 	"https://www.google.com",
-	"https://www.openai.com",
 	"https://www.github.com",
 	"https://www.cloudflare.com",
+	"https://www.mozilla.org",
+	"https://www.microsoft.com",
 	"https://httpbin.org/ip",
 }
 
@@ -101,13 +67,13 @@ func checkHTTPSConnect(proxyAddr string, timeout time.Duration) bool {
 		return false
 	}
 
+	transport := newProbeTransport(timeout)
+	transport.Proxy = http.ProxyURL(proxyURL)
 	client := &http.Client{
-		Transport: &http.Transport{
-			Proxy:               http.ProxyURL(proxyURL),
-			TLSHandshakeTimeout: timeout,
-		},
-		Timeout: timeout,
+		Transport: transport,
+		Timeout:   timeout,
 	}
+	defer transport.CloseIdleConnections()
 
 	// 随机起始索引
 	start := int(time.Now().UnixNano() % int64(len(httpsTestTargets)))
@@ -121,13 +87,109 @@ func checkHTTPSConnect(proxyAddr string, timeout time.Duration) bool {
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 
-		// 2xx 或 3xx 都算成功（部分网站会重定向）
-		if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+		// 2xx/3xx/4xx 都说明 CONNECT 隧道已经打通；
+		// 这里只验证代理转发能力，不把目标站点策略误判成代理故障。
+		if resp.StatusCode >= 200 && resp.StatusCode < 500 {
 			return true
 		}
 	}
 
 	return false
+}
+
+func checkReachability(client *http.Client, targets []string, attempts int, accept func(int) bool) (bool, time.Duration) {
+	if len(targets) == 0 {
+		return false, 0
+	}
+	if attempts < 1 {
+		attempts = 1
+	}
+	if attempts > len(targets) {
+		attempts = len(targets)
+	}
+
+	start := int(time.Now().UnixNano() % int64(len(targets)))
+	for attempt := 0; attempt < attempts; attempt++ {
+		target := targets[(start+attempt)%len(targets)]
+		began := time.Now()
+		resp, err := client.Get(target)
+		latency := time.Since(began)
+		if err != nil {
+			continue
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if accept(resp.StatusCode) {
+			return true, latency
+		}
+	}
+
+	return false, 0
+}
+
+func probeFallbackTargets(cfg *config.Config) []string {
+	if cfg == nil || len(cfg.ValidateFallbackURLs) == 0 {
+		return nil
+	}
+	targets := make([]string, 0, len(cfg.ValidateFallbackURLs))
+	seen := make(map[string]struct{}, len(cfg.ValidateFallbackURLs))
+	for _, raw := range cfg.ValidateFallbackURLs {
+		target := strings.TrimSpace(raw)
+		if target == "" {
+			continue
+		}
+		if _, ok := seen[target]; ok {
+			continue
+		}
+		seen[target] = struct{}{}
+		targets = append(targets, target)
+	}
+	return targets
+}
+
+func validationTargets(primary string, cfg *config.Config) []string {
+	targets := make([]string, 0, 1+len(probeFallbackTargets(cfg)))
+	seen := make(map[string]struct{})
+
+	appendTarget := func(raw string) {
+		target := strings.TrimSpace(raw)
+		if target == "" {
+			return
+		}
+		if _, ok := seen[target]; ok {
+			return
+		}
+		seen[target] = struct{}{}
+		targets = append(targets, target)
+	}
+
+	appendTarget(primary)
+	for _, target := range probeFallbackTargets(cfg) {
+		appendTarget(target)
+	}
+	return targets
+}
+
+func validationAttempts(targets []string) int {
+	switch n := len(targets); {
+	case n <= 1:
+		return n
+	case n <= 4:
+		return 2
+	default:
+		return 3
+	}
+}
+
+func cloneClientWithTimeout(client *http.Client, timeout time.Duration) *http.Client {
+	if client == nil {
+		return nil
+	}
+	cloned := *client
+	if timeout > 0 && (cloned.Timeout == 0 || cloned.Timeout > timeout) {
+		cloned.Timeout = timeout
+	}
+	return &cloned
 }
 
 // ValidateAll 并发验证所有代理，返回验证结果
@@ -185,13 +247,14 @@ func (v *Validator) ValidateStreamContext(ctx context.Context, proxies []storage
 // ValidateOne 验证单个代理是否可用，返回是否有效、延迟、出口IP和地理位置
 func (v *Validator) ValidateOne(p storage.Proxy) (bool, time.Duration, string, string) {
 	var client *http.Client
+	var cleanup func()
 	var err error
 
 	switch p.Protocol {
 	case "http":
-		client, err = newHTTPClient(p.Address, v.timeout)
+		client, cleanup, err = newHTTPClient(p.Address, v.timeout)
 	case "socks5":
-		client, err = newSOCKS5Client(p.Address, v.timeout)
+		client, cleanup, err = newSOCKS5Client(p.Address, v.timeout)
 	default:
 		log.Printf("unknown protocol %s for %s", p.Protocol, p.Address)
 		return false, 0, "", ""
@@ -200,57 +263,27 @@ func (v *Validator) ValidateOne(p storage.Proxy) (bool, time.Duration, string, s
 	if err != nil {
 		return false, 0, "", ""
 	}
-
-	start := time.Now()
-	resp, err := client.Get(v.validateURL)
-	latency := time.Since(start)
-	if err != nil {
-		return false, 0, "", ""
-	}
-	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
-
-	// 验证状态码（200 或 204 都接受）
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		return false, latency, "", ""
+	if cleanup != nil {
+		defer cleanup()
 	}
 
-	// 响应时间过滤
-	if v.maxResponseMs > 0 && latency > time.Duration(v.maxResponseMs)*time.Millisecond {
+	targets := validationTargets(v.validateURL, v.cfg)
+	ok, latency := checkReachability(client, targets, validationAttempts(targets), func(code int) bool {
+		return code >= 200 && code < 500
+	})
+	if !ok {
 		return false, latency, "", ""
 	}
 
 	// 获取出口 IP 和地理位置（仅在验证通过时）
-	exitIP, exitLocation := getExitIPInfo(client)
+	exitClient := cloneClientWithTimeout(client, exitInfoTimeoutCap)
+	exitIP, exitLocation := fetcher.GetExitIPInfo(exitClient)
 
-	// 必须能获取到出口信息
-	if exitIP == "" || exitLocation == "" {
-		return false, latency, exitIP, exitLocation
+	if strings.TrimSpace(exitLocation) == "" {
+		exitLocation = "UNKNOWN"
 	}
-
-	// 地理过滤：白名单优先，否则走黑名单
-	if v.cfg != nil && len(exitLocation) >= 2 {
-		countryCode := exitLocation[:2]
-		if len(v.cfg.AllowedCountries) > 0 {
-			// 白名单模式：不在白名单中则拒绝
-			allowed := false
-			for _, a := range v.cfg.AllowedCountries {
-				if countryCode == a {
-					allowed = true
-					break
-				}
-			}
-			if !allowed {
-				return false, latency, exitIP, exitLocation
-			}
-		} else if len(v.cfg.BlockedCountries) > 0 {
-			// 黑名单模式
-			for _, blocked := range v.cfg.BlockedCountries {
-				if countryCode == blocked {
-					return false, latency, exitIP, exitLocation
-				}
-			}
-		}
+	if strings.TrimSpace(exitIP) == "" {
+		exitIP = "UNKNOWN"
 	}
 
 	// HTTP 代理额外检测：必须支持 HTTPS CONNECT 隧道
@@ -261,30 +294,4 @@ func (v *Validator) ValidateOne(p storage.Proxy) (bool, time.Duration, string, s
 	}
 
 	return true, latency, exitIP, exitLocation
-}
-
-func newHTTPClient(address string, timeout time.Duration) (*http.Client, error) {
-	proxyURL, err := url.Parse(fmt.Sprintf("http://%s", address))
-	if err != nil {
-		return nil, err
-	}
-	return &http.Client{
-		Transport: &http.Transport{
-			Proxy: http.ProxyURL(proxyURL),
-		},
-		Timeout: timeout,
-	}, nil
-}
-
-func newSOCKS5Client(address string, timeout time.Duration) (*http.Client, error) {
-	dialer, err := proxy.SOCKS5("tcp", address, nil, proxy.Direct)
-	if err != nil {
-		return nil, err
-	}
-	return &http.Client{
-		Transport: &http.Transport{
-			Dial: dialer.Dial,
-		},
-		Timeout: timeout,
-	}, nil
 }
