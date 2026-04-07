@@ -1,8 +1,8 @@
 # Data 目录说明
 
-GoProxy 的所有运行时数据和配置存储在数据目录中。
+ProxyGate 的所有运行时数据和配置存储在数据目录中。
 
-**默认配置**（`docker-compose.yml`）：使用 Docker Named Volume `goproxy-data`，由 Docker 自动管理，数据持久化且独立于容器生命周期。实际 Docker 卷名可能带 Compose 项目前缀。
+**默认配置**（`docker-compose.yml`）：使用 Docker Named Volume `proxygate-data`，由 Docker 自动管理，数据持久化且独立于容器生命周期。实际 Docker 卷名可能带 Compose 项目前缀。
 
 ## 📁 目录内容
 
@@ -55,17 +55,17 @@ GoProxy 的所有运行时数据和配置存储在数据目录中。
 
 ### Dokploy / 生产部署（Named Volume）
 
-**Compose 声明名**：`goproxy-data`
+**Compose 声明名**：`proxygate-data`
 
 **实际位置**（Linux，示例）：
 ```bash
-/var/lib/docker/volumes/<project>_goproxy-data/_data/
+/var/lib/docker/volumes/<project>_proxygate-data/_data/
 ```
 
 **查看数据**：
 ```bash
 # 进入运行中的容器
-docker exec -it proxygo sh
+docker exec -it proxygate sh
 
 # 查看数据目录
 ls -lh /app/data/
@@ -77,8 +77,8 @@ sqlite3 /app/data/proxy.db "SELECT COUNT(*) FROM proxies;"
 **备份数据**：
 ```bash
 # 手动导出卷
-docker run --rm -v goproxy-data:/data -v $(pwd):/backup \
-  alpine tar czf /backup/goproxy-backup-$(date +%Y%m%d).tar.gz -C /data .
+docker run --rm -v proxygate-data:/data -v $(pwd):/backup \
+  alpine tar czf /backup/proxygate-backup-$(date +%Y%m%d).tar.gz -C /data .
 ```
 
 **恢复数据**：
@@ -87,8 +87,8 @@ docker run --rm -v goproxy-data:/data -v $(pwd):/backup \
 docker compose down
 
 # 恢复备份
-docker run --rm -v goproxy-data:/data -v $(pwd):/backup \
-  alpine sh -c "cd /data && tar xzf /backup/goproxy-backup-20260328.tar.gz"
+docker run --rm -v proxygate-data:/data -v $(pwd):/backup \
+  alpine sh -c "cd /data && tar xzf /backup/proxygate-backup-20260328.tar.gz"
 
 # 重启服务
 docker compose up -d
@@ -110,7 +110,7 @@ sqlite3 data/proxy.db "SELECT COUNT(*) FROM proxies;"
 **备份数据**：
 ```bash
 # 简单打包
-tar czf goproxy-backup-$(date +%Y%m%d).tar.gz data/
+tar czf proxygate-backup-$(date +%Y%m%d).tar.gz data/
 
 # 或仅备份数据库
 cp data/proxy.db backups/proxy-$(date +%Y%m%d).db
@@ -124,10 +124,10 @@ cp data/proxy.db backups/proxy-$(date +%Y%m%d).db
 
 ```yaml
 volumes:
-  - goproxy-data:/app/data  # Named Volume
+  - proxygate-data:/app/data  # Named Volume
 
 volumes:
-  goproxy-data:              # 定义卷
+  proxygate-data:              # 定义卷
 ```
 
 **优势**：
@@ -160,12 +160,12 @@ docker run -v "$(pwd)/data:/app/data" ...
 
 ```yaml
 services:
-  goproxy:
+  proxygate:
     volumes:
-      - goproxy-data:/app/data
+      - proxygate-data:/app/data
 
 volumes:
-  goproxy-data:
+  proxygate-data:
 ```
 
 **说明**：
@@ -179,7 +179,7 @@ volumes:
 docker run -d \
   -v "$(pwd)/data:/app/data" \  # 挂载 data 目录
   -e DATA_DIR=/app/data \        # 告诉程序数据目录位置
-  ghcr.io/isboyjc/goproxy:latest
+  ghcr.io/ruruamour/proxygate:latest
 ```
 
 ## 📊 数据大小
@@ -261,7 +261,7 @@ docker compose up -d
 
 ```bash
 # 备份整个 data 目录
-tar -czf goproxy-backup-$(date +%Y%m%d).tar.gz data/
+tar -czf proxygate-backup-$(date +%Y%m%d).tar.gz data/
 
 # 或仅备份数据库
 cp data/proxy.db backups/proxy-$(date +%Y%m%d).db

@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 
-	"goproxy/config"
-	"goproxy/storage"
-	"goproxy/validator"
+	"proxygate/config"
+	"proxygate/storage"
+	"proxygate/validator"
 )
 
 var subscriptionUserAgents = []string{
@@ -514,6 +514,7 @@ func (m *Manager) fetchWithRetry(urlStr string) ([]byte, error) {
 // fetchURL 直连拉取 URL 内容。
 func (m *Manager) fetchURL(urlStr string) ([]byte, error) {
 	transport := &http.Transport{}
+	defer transport.CloseIdleConnections()
 	client := &http.Client{Timeout: 30 * time.Second, Transport: transport}
 	var lastErr error
 	for _, ua := range subscriptionUserAgents {
@@ -583,6 +584,7 @@ func (m *Manager) validateCustomProxies(proxies []storage.Proxy, subID int64) in
 	log.Printf("[custom] 验证完成：%d 可用，%d 不可用", valid, invalid)
 	return valid
 }
+
 // GetStatus 获取订阅管理器状态
 func (m *Manager) GetStatus() map[string]interface{} {
 	customCount, _ := m.storage.CountBySource("custom")

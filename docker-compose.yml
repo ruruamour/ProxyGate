@@ -1,6 +1,5 @@
 services:
-  goproxy:
-    # 默认构建当前仓库代码
+  proxygate:
     build:
       context: .
       args:
@@ -15,11 +14,7 @@ services:
         https_proxy: ${DOCKER_BUILD_HTTPS_PROXY:-}
         no_proxy: ${DOCKER_BUILD_NO_PROXY:-}
 
-    # 如需改回上游预构建镜像，可使用下面两行替换 build
-    # image: ghcr.io/isboyjc/goproxy:latest
-    # pull_policy: always
-    
-    container_name: ${CONTAINER_NAME:-goproxy}
+    container_name: ${CONTAINER_NAME:-proxygate}
     restart: unless-stopped
     ports:
       - "${STABLE_PORT:-7776}:7776"          # HTTP 最低延迟
@@ -28,11 +23,11 @@ services:
       - "${SOCKS5_RANDOM_PORT:-7779}:7779"   # SOCKS5 随机轮换
       - "${SOCKS5_STABLE_PORT:-7780}:7780"   # SOCKS5 最低延迟
     volumes:
-      - goproxy-data:/app/data
+      - proxygate-data:/app/data
     environment:
       - TZ=${TZ:-Asia/Shanghai}
       - DATA_DIR=/app/data
-      - WEBUI_PASSWORD=${WEBUI_PASSWORD:-goproxy}
+      - WEBUI_PASSWORD=${WEBUI_PASSWORD:-proxygate}
       - PROXY_AUTH_ENABLED=${PROXY_AUTH_ENABLED:-false}
       - PROXY_AUTH_USERNAME=${PROXY_AUTH_USERNAME:-proxy}
       - PROXY_AUTH_PASSWORD=${PROXY_AUTH_PASSWORD}
@@ -47,4 +42,4 @@ services:
       retries: 3
 
 volumes:
-  goproxy-data:
+  proxygate-data:

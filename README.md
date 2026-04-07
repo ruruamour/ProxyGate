@@ -1,18 +1,13 @@
-# GoProxy
+# ProxyGate
 
 > **自托管代理网关** — 聚合公开代理与订阅节点，统一验证入池，通过统一 HTTP/SOCKS5 网关输出并支持会话粘性
 
-[![Upstream Docker Hub](https://img.shields.io/docker/v/isboyjc/goproxy?label=Upstream%20Docker%20Hub&logo=docker)](https://hub.docker.com/r/isboyjc/goproxy)
-[![Upstream GHCR](https://img.shields.io/badge/GHCR-upstream-blue?logo=github)](https://github.com/isboyjc/GoProxy/pkgs/container/goproxy)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go)](https://go.dev/)
 
-GoProxy 是一个基于 Go 的自托管代理网关，聚合公开代理与 Clash/V2ray 等订阅节点，通过出口 IP、地理位置、延迟和 HTTPS CONNECT 可用性验证后统一入池，再以统一的 HTTP/SOCKS5 代理入口对外输出，并支持基于 `sid` / `t` 的会话粘性与地域筛选。订阅节点会先以禁用状态入库，验证通过后再激活，失败节点保留并定时探测恢复。
+ProxyGate 是一个基于 Go 的自托管代理网关，聚合公开代理与 Clash/V2ray 等订阅节点，通过出口 IP、地理位置、延迟和 HTTPS CONNECT 可用性验证后统一入池，再以统一的 HTTP/SOCKS5 代理入口对外输出，并支持基于 `sid` / `t` 的会话粘性与地域筛选。订阅节点会先以禁用状态入库，验证通过后再激活，失败节点保留并定时探测恢复。
 
-**原项目**：[github.com/isboyjc/GoProxy](https://github.com/isboyjc/GoProxy)
-
-> 当前仓库基于原项目继续演进，并保持整体结构与使用方式基本一致。`docker-compose.yml` 默认会构建并运行当前仓库代码；README 中提到的 Docker Hub / GHCR 预构建镜像均指上游仓库产物，如果要运行当前 fork，优先使用 `docker compose build` 或 `docker compose up -d` 直接构建。
-
+> 本项目设计灵感来源于 [isboyjc/GoProxy](https://github.com/isboyjc/GoProxy)
 ## 核心特性
 
 ### 双池架构
@@ -62,11 +57,11 @@ GoProxy 是一个基于 Go 的自托管代理网关，聚合公开代理与 Clas
 ### Docker 部署（推荐）
 
 ```bash
-# 一键启动（默认构建当前仓库代码）
+# 一键启动
 docker compose up -d
 
 # 访问 WebUI
-# http://localhost:7778（默认密码：goproxy）
+# http://localhost:7778（默认密码：proxygate）
 ```
 
 自定义配置：
@@ -74,13 +69,6 @@ docker compose up -d
 ```bash
 cp .env.example .env
 vim .env  # 修改密码、认证、地理过滤等
-docker compose up -d
-```
-
-如果要改回上游预构建镜像：
-
-```bash
-# 注释 build: .，恢复 image / pull_policy
 docker compose up -d
 ```
 
@@ -98,7 +86,7 @@ go mod download
 go run .
 
 # 或编译后运行
-go build -o proxygo . && ./proxygo
+go build -o proxygate . && ./proxygate
 ```
 
 本地开发说明：
@@ -129,14 +117,16 @@ export https_proxy=http://localhost:7777
 
 ```bash
 # 随机轮换
-curl --socks5 localhost:7779 https://httpbin.org/ip
+curl --socks5-hostname localhost:7779 https://httpbin.org/ip
 
 # 最低延迟
-curl --socks5 localhost:7780 https://httpbin.org/ip
+curl --socks5-hostname localhost:7780 https://httpbin.org/ip
 
 # 环境变量方式
-export ALL_PROXY=socks5://localhost:7779
+export ALL_PROXY=socks5h://localhost:7779
 ```
+
+> `socks5://` 往往是本地解析，`socks5h://` 才是远程解析。对风控敏感站点、必须避免本地 DNS 泄露的场景，建议优先使用 `socks5h://` 或 `curl --socks5-hostname`。
 
 ### 带认证使用
 
@@ -145,11 +135,11 @@ export ALL_PROXY=socks5://localhost:7779
 curl -x http://proxy:pass@your-server:7777 https://httpbin.org/ip
 
 # SOCKS5
-curl --socks5 proxy:pass@your-server:7779 https://httpbin.org/ip
+curl --socks5-hostname proxy:pass@your-server:7779 https://httpbin.org/ip
 
 # 环境变量
 export http_proxy=http://proxy:pass@your-server:7777
-export ALL_PROXY=socks5://proxy:pass@your-server:7779
+export ALL_PROXY=socks5h://proxy:pass@your-server:7779
 ```
 
 ### 会话粘性与地域筛选
@@ -175,7 +165,7 @@ proxy-region-JP-st-TOKYO-sid-Session88-t-30
 curl -x http://proxy-region-US-sid-order-sync-t-10:pass@your-server:7777 https://httpbin.org/ip
 
 # 走东京节点，并在 30 分钟内保持粘性
-curl --socks5 proxy-region-JP-st-TOKYO-sid-bot-01-t-30:pass@your-server:7779 https://httpbin.org/ip
+curl --socks5-hostname proxy-region-JP-st-TOKYO-sid-bot-01-t-30:pass@your-server:7779 https://httpbin.org/ip
 ```
 
 ### 编程语言示例
@@ -189,7 +179,7 @@ proxies = {'http': 'http://localhost:7777', 'https': 'http://localhost:7777'}
 requests.get('https://httpbin.org/ip', proxies=proxies)
 
 # SOCKS5 代理（需 pip install requests[socks]）
-proxies = {'http': 'socks5://localhost:7779', 'https': 'socks5://localhost:7779'}
+proxies = {'http': 'socks5h://localhost:7779', 'https': 'socks5h://localhost:7779'}
 requests.get('https://httpbin.org/ip', proxies=proxies)
 ```
 
@@ -198,7 +188,7 @@ requests.get('https://httpbin.org/ip', proxies=proxies)
 // SOCKS5（需 npm install socks-proxy-agent node-fetch）
 const { SocksProxyAgent } = require('socks-proxy-agent');
 const fetch = require('node-fetch');
-const agent = new SocksProxyAgent('socks5://localhost:7779');
+const agent = new SocksProxyAgent('socks5h://localhost:7779');
 fetch('https://httpbin.org/ip', { agent }).then(r => r.json()).then(console.log);
 ```
 
@@ -235,35 +225,35 @@ ssh -o ProxyCommand='nc -X 5 -x localhost:7779 %h %p' user@remote-server
 
 ## Docker 部署详解
 
-### docker run 方式（使用上游预构建镜像）
+### docker run 方式
 
 ```bash
-docker run -d --name proxygo \
+docker run -d --name proxygate \
   -p 7776:7776 -p 7777:7777 -p 7778:7778 -p 7779:7779 -p 7780:7780 \
   -e WEBUI_PASSWORD=your_password \
   -e PROXY_AUTH_ENABLED=true \
   -e PROXY_AUTH_USERNAME=myuser \
   -e PROXY_AUTH_PASSWORD=mypass \
-  -v goproxy-data:/app/data \
-  ghcr.io/isboyjc/goproxy:latest
+  -v proxygate-data:/app/data \
+  ghcr.io/ruruamour/proxygate:latest
 ```
 
 ### 数据持久化
 
-- docker-compose 使用 Named Volume `goproxy-data`，容器重启/更新不丢数据
+- docker-compose 使用 Named Volume `proxygate-data`，容器重启/更新不丢数据
 - 数据包含：SQLite 数据库（代理池）、config.json（配置）、sing-box 配置
 
 **备份**：
 ```bash
-docker run --rm -v goproxy-data:/data -v $(pwd):/backup \
-  alpine tar czf /backup/goproxy-backup-$(date +%Y%m%d).tar.gz -C /data .
+docker run --rm -v proxygate-data:/data -v $(pwd):/backup \
+  alpine tar czf /backup/proxygate-backup-$(date +%Y%m%d).tar.gz -C /data .
 ```
 
 **恢复**：
 ```bash
 docker compose down
-docker run --rm -v goproxy-data:/data -v $(pwd):/backup \
-  alpine sh -c "cd /data && tar xzf /backup/goproxy-backup-*.tar.gz"
+docker run --rm -v proxygate-data:/data -v $(pwd):/backup \
+  alpine sh -c "cd /data && tar xzf /backup/proxygate-backup-*.tar.gz"
 docker compose up -d
 ```
 
@@ -279,7 +269,7 @@ docker compose up -d
 
 | 变量 | 默认值 | 必须 | 说明 |
 |------|--------|------|------|
-| `WEBUI_PASSWORD` | `goproxy` | 是 | WebUI 登录密码，生产环境务必修改 |
+| `WEBUI_PASSWORD` | `proxygate` | 是 | WebUI 登录密码，生产环境务必修改 |
 | `STABLE_PORT` | `7776` | 否 | HTTP 最低延迟代理端口 |
 | `RANDOM_PORT` | `7777` | 否 | HTTP 随机轮换代理端口 |
 | `WEBUI_PORT` | `7778` | 否 | WebUI 端口 |
@@ -350,9 +340,9 @@ main.go                    # 入口，协调所有模块
 
 使用本项目即表示您已阅读并同意以上声明。
 
-## 友情链接
+## 致谢
 
-- [LINUX DO](https://linux.do/) — 真诚、友善、团结、专业，共建你我引以为傲的社区
+- [isboyjc/GoProxy](https://github.com/isboyjc/GoProxy) — 本项目的设计灵感来源
 
 ## License
 

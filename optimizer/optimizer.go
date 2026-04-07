@@ -1,14 +1,15 @@
 package optimizer
 
 import (
+	"context"
 	"log"
 	"time"
 
-	"goproxy/config"
-	"goproxy/fetcher"
-	"goproxy/pool"
-	"goproxy/storage"
-	"goproxy/validator"
+	"proxygate/config"
+	"proxygate/fetcher"
+	"proxygate/pool"
+	"proxygate/storage"
+	"proxygate/validator"
 )
 
 // Optimizer 优化轮换器
@@ -106,7 +107,7 @@ func (o *Optimizer) RunOnce() {
 }
 
 // StartBackground 后台定时优化
-func (o *Optimizer) StartBackground() {
+func (o *Optimizer) StartBackground(ctx context.Context) {
 	go func() {
 		for {
 			cfg := o.currentConfig()
@@ -114,8 +115,14 @@ func (o *Optimizer) StartBackground() {
 			if interval <= 0 {
 				interval = 30 * time.Minute
 			}
-			<-time.After(interval)
-			o.RunOnce()
+			timer := time.NewTimer(interval)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+				o.RunOnce()
+			}
 		}
 	}()
 	log.Printf("[optimize] 优化轮换器已启动，间隔 %d 分钟", o.currentConfig().OptimizeInterval)

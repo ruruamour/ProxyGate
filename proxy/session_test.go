@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"goproxy/config"
-	"goproxy/storage"
+	"proxygate/config"
+	"proxygate/storage"
 )
 
 func TestParseUsernameOptions(t *testing.T) {

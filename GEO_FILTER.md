@@ -1,12 +1,12 @@
 # 地理过滤配置指南
 
-GoProxy 支持通过国家代码过滤代理的出口位置，让你可以灵活控制代理池的地理分布。支持黑名单（屏蔽指定国家）和白名单（仅允许指定国家）两种模式。
+ProxyGate 支持通过国家代码过滤代理的出口位置，让你可以灵活控制代理池的地理分布。支持黑名单（屏蔽指定国家）和白名单（仅允许指定国家）两种模式。
 
 ## 🌍 配置方式
 
 ### 过滤模式
 
-GoProxy 提供两种互斥的过滤模式：
+ProxyGate 提供两种互斥的过滤模式：
 
 | 模式 | 环境变量 | 说明 |
 |------|---------|------|
@@ -65,20 +65,20 @@ docker compose up -d
 
 ```bash
 # 黑名单模式
-docker run -d --name proxygo \
+docker run -d --name proxygate \
   -p 127.0.0.1:7776:7776 -p 127.0.0.1:7777:7777 -p 7778:7778 \
   -e BLOCKED_COUNTRIES=CN,RU \
   -e WEBUI_PASSWORD=your_password \
   -v "$(pwd)/data:/app/data" \
-  ghcr.io/isboyjc/goproxy:latest
+  ghcr.io/ruruamour/proxygate:latest
 
 # 白名单模式
-docker run -d --name proxygo \
+docker run -d --name proxygate \
   -p 127.0.0.1:7776:7776 -p 127.0.0.1:7777:7777 -p 7778:7778 \
   -e ALLOWED_COUNTRIES=US,JP,KR,SG \
   -e WEBUI_PASSWORD=your_password \
   -v "$(pwd)/data:/app/data" \
-  ghcr.io/isboyjc/goproxy:latest
+  ghcr.io/ruruamour/proxygate:latest
 ```
 
 ### 本地运行配置

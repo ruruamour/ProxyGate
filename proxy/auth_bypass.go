@@ -4,7 +4,7 @@ import (
 	"net"
 	"strings"
 
-	"goproxy/config"
+	"proxygate/config"
 )
 
 func canBypassProxyAuth(cfg *config.Config, remoteAddr string) bool {

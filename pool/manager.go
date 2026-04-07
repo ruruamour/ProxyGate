@@ -3,8 +3,8 @@ package pool
 import (
 	"log"
 
-	"goproxy/config"
-	"goproxy/storage"
+	"proxygate/config"
+	"proxygate/storage"
 )
 
 // Manager 池子管理器

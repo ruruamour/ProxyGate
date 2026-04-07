@@ -1,6 +1,6 @@
-# GoProxy 测试脚本
+# ProxyGate 测试脚本
 
-本目录包含用于测试 GoProxy 代理服务的脚本。所有脚本都采用**持续运行模式**（类似 `ping` 命令），按 `Ctrl+C` 停止并显示统计。
+本目录包含用于测试 ProxyGate 代理服务的脚本。所有脚本都采用**持续运行模式**（类似 `ping` 命令），按 `Ctrl+C` 停止并显示统计。
 
 ## 📝 脚本列表
 
@@ -36,6 +36,8 @@
 
 # 按 Ctrl+C 停止并查看统计
 ```
+
+> `socks5://` 往往是本地解析，`socks5h://` 才是远程解析。测试脚本内部已经使用 `curl --socks5-hostname`，避免本地 DNS 或 fake-ip 影响结果。
 
 ### Go 脚本
 
@@ -142,6 +144,6 @@ proxy from 🇫🇷 192.0.2.234: seq=6 time=1456ms
 
 ## 📝 注意事项
 
-1. 确保 GoProxy 服务已启动：`./goproxy`
+1. 确保 ProxyGate 服务已启动：`./proxygate`
 2. 首次启动需等待代理池就绪（约 30-60 秒）
 3. 可配合 WebUI (http://localhost:7778) 查看实时状态

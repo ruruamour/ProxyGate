@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-GoProxy 持续测试脚本 - 类似 ping 命令的简洁输出
+ProxyGate 持续测试脚本 - 类似 ping 命令的简洁输出
 按 Ctrl+C 停止测试
 """
 

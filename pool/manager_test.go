@@ -3,7 +3,7 @@ package pool
 import (
 	"testing"
 
-	"goproxy/config"
+	"proxygate/config"
 )
 
 func TestNeedsFetchSkipsFreeFetchInCustomOnlyMode(t *testing.T) {

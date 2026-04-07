@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"goproxy/storage"
+	"proxygate/storage"
 )
 
 type RequestOptions struct {
@@ -23,7 +23,7 @@ type sessionEntry struct {
 }
 
 type SessionManager struct {
-	mu       sync.Mutex
+	mu       sync.RWMutex
 	sessions map[string]sessionEntry
 	locks    sync.Map
 }
@@ -40,15 +40,18 @@ func (m *SessionManager) Get(key string) (string, bool) {
 	}
 
 	now := time.Now()
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	m.mu.RLock()
 	entry, ok := m.sessions[key]
+	m.mu.RUnlock()
 	if !ok {
 		return "", false
 	}
 	if now.After(entry.ExpiresAt) {
-		delete(m.sessions, key)
+		m.mu.Lock()
+		if current, ok := m.sessions[key]; ok && current == entry && now.After(current.ExpiresAt) {
+			delete(m.sessions, key)
+		}
+		m.mu.Unlock()
 		return "", false
 	}
 	return entry.Address, true

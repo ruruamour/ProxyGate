@@ -138,7 +138,7 @@
   - 默认关闭，开启后可保护代理服务不被未授权访问
 
 - **环境变量支持**
-  - `WEBUI_PASSWORD`：自定义 WebUI 管理密码（默认 `goproxy`）
+  - `WEBUI_PASSWORD`：自定义 WebUI 管理密码（默认 `proxygate`）
   - `DATA_DIR`：自定义数据目录路径（默认当前目录）
   - `BLOCKED_COUNTRIES`：屏蔽特定国家的代理（如 `CN,RU,KP`）
 
@@ -190,7 +190,7 @@
 
 ## 相关链接
 
-- [项目仓库](https://github.com/ruruamour/GoProxy)
-- [Docker Hub](https://hub.docker.com/r/isboyjc/goproxy)
-- [GitHub Container Registry](https://github.com/isboyjc/GoProxy/pkgs/container/goproxy)
-- [问题反馈](https://github.com/ruruamour/GoProxy/issues)
+- [项目仓库](https://github.com/ruruamour/ProxyGate)
+- [Docker Hub](https://hub.docker.com/r/ruruamour/proxygate)
+- [GitHub Container Registry](https://github.com/ruruamour/ProxyGate/pkgs/container/proxygate)
+- [问题反馈](https://github.com/ruruamour/ProxyGate/issues)

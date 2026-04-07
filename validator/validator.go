@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"goproxy/config"
-	"goproxy/fetcher"
-	"goproxy/storage"
+	"proxygate/config"
+	"proxygate/fetcher"
+	"proxygate/storage"
 )
 
 const exitInfoTimeoutCap = 4 * time.Second
@@ -127,6 +127,26 @@ func checkReachability(client *http.Client, targets []string, attempts int, acce
 	return false, 0
 }
 
+func probeTarget(client *http.Client, target string, accept func(int) bool) (bool, time.Duration) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return false, 0
+	}
+
+	began := time.Now()
+	resp, err := client.Get(target)
+	latency := time.Since(began)
+	if err != nil {
+		return false, latency
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if accept(resp.StatusCode) {
+		return true, latency
+	}
+	return false, latency
+}
+
 func probeFallbackTargets(cfg *config.Config) []string {
 	if cfg == nil || len(cfg.ValidateFallbackURLs) == 0 {
 		return nil
@@ -145,6 +165,14 @@ func probeFallbackTargets(cfg *config.Config) []string {
 		targets = append(targets, target)
 	}
 	return targets
+}
+
+func splitValidationTargets(primary string, cfg *config.Config) (string, []string) {
+	targets := validationTargets(primary, cfg)
+	if len(targets) == 0 {
+		return "", nil
+	}
+	return targets[0], targets[1:]
 }
 
 func validationTargets(primary string, cfg *config.Config) []string {
@@ -267,10 +295,16 @@ func (v *Validator) ValidateOne(p storage.Proxy) (bool, time.Duration, string, s
 		defer cleanup()
 	}
 
-	targets := validationTargets(v.validateURL, v.cfg)
-	ok, latency := checkReachability(client, targets, validationAttempts(targets), func(code int) bool {
+	primaryTarget, fallbackTargets := splitValidationTargets(v.validateURL, v.cfg)
+	ok, latency := probeTarget(client, primaryTarget, func(code int) bool {
 		return code >= 200 && code < 500
 	})
+	if !ok && len(fallbackTargets) > 0 {
+		// 仅用 fallback 兜底“可用性”，不让不同目标站点的 RTT 混入延迟分数。
+		ok, _ = checkReachability(client, fallbackTargets, validationAttempts(fallbackTargets), func(code int) bool {
+			return code >= 200 && code < 500
+		})
+	}
 	if !ok {
 		return false, latency, "", ""
 	}

@@ -5,199 +5,670 @@ const dashboardHTML = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>GoProxy — 智能代理池</title>
+<title>ProxyGate — 智能代理网关</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#0a0a0a;
-  --bg-elevated:#111;
-  --bg-card:#0d0d0d;
-  --fg:#00ff41;
-  --fg-dim:#00cc33;
-  --fg-text:#0f0;
-  --border:#1a3a1a;
-  --border-heavy:#00ff41;
-  --gray-1:#0d0d0d;
-  --gray-2:#151515;
-  --gray-3:#1a1a1a;
-  --gray-4:#2a4a2a;
-  --gray-5:#00aa2a;
-  --gray-6:#00dd38;
-  --green:#00ff41;
-  --yellow:#ffff00;
-  --orange:#ff8800;
-  --red:#ff0033;
-  --mono:JetBrains Mono,Share Tech Mono,monospace;
-  --sans:JetBrains Mono,monospace;
+  --bg:#f2ebd9;
+  --bg-soft:#f7f1e6;
+  --bg-elevated:#f8f3e8;
+  --bg-card:rgba(253,251,247,0.92);
+  --bg-card-solid:#fdfbf7;
+  --bg-muted:#efe4d2;
+  --bg-hover:#f4ebdc;
+  --fg:#1c1917;
+  --fg-dim:#5f574d;
+  --fg-soft:#8a7f72;
+  --border:#e8ddd4;
+  --border-strong:#d8c8b8;
+  --primary:#2d6a4f;
+  --primary-strong:#1b4332;
+  --primary-soft:#eef5f1;
+  --green:#7cb08a;
+  --yellow:#e0b15e;
+  --orange:#de9963;
+  --red:#d97868;
+  --red-soft:#fdf2f1;
+  --shadow-xs:0 2px 8px rgba(67,56,42,0.06);
+  --shadow-sm:0 8px 24px rgba(67,56,42,0.08);
+  --shadow-md:0 18px 40px rgba(67,56,42,0.1),0 4px 12px rgba(67,56,42,0.05);
+  --shadow-lg:0 28px 60px rgba(67,56,42,0.12),0 8px 24px rgba(67,56,42,0.06);
+  --radius-sm:14px;
+  --radius-md:18px;
+  --radius-lg:24px;
+  --radius-xl:28px;
+  --radius-pill:999px;
+  --mono:"JetBrains Mono",ui-monospace,monospace;
+  --sans:"Nunito","Noto Sans SC",system-ui,sans-serif;
 }
-body{background:var(--bg);color:var(--fg);font-family:var(--mono);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;position:relative}
-
-/* CRT 扫描线效果 */
-body::before{content:'';position:fixed;top:0;left:0;width:100%;height:100%;background:repeating-linear-gradient(0deg,rgba(0,255,65,0.03) 0px,transparent 1px,transparent 2px,rgba(0,255,65,0.03) 3px);pointer-events:none;z-index:9999}
-
-/* 荧光光晕效果 */
-body::after{content:'';position:fixed;top:0;left:0;width:100%;height:100%;background:radial-gradient(ellipse at center,rgba(0,255,65,0.05) 0%,transparent 70%);pointer-events:none;z-index:9998}
-
-.layout{max-width:1800px;margin:0 auto;padding:0 32px}
-
-/* 双列布局 */
-.content-grid{display:grid;grid-template-columns:1fr 420px;gap:32px;align-items:start}
-.main-content{min-width:0;position:relative}
-.sidebar{position:sticky;top:32px}
-
-/* 控制面板 */
-.control-panel{background:var(--bg-card);border:1px solid var(--border-heavy);padding:20px;margin-bottom:20px;box-shadow:0 0 20px rgba(0,255,65,0.15)}
-.control-header{display:flex;align-items:center;justify-content:center;margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--border)}
-.control-title{font-size:14px;font-weight:700;letter-spacing:0.12em;font-family:var(--mono);text-transform:uppercase;color:var(--fg);text-shadow:0 0 10px var(--fg)}
-.control-ops{display:flex;flex-direction:row;gap:8px}
-.ctrl-btn-primary{width:100%;padding:10px;font-size:10px;font-weight:600;cursor:pointer;border:1px solid var(--border-heavy);background:var(--bg-card);color:var(--fg);font-family:var(--mono);text-transform:uppercase;letter-spacing:0.08em;transition:all 0.2s}
-.ctrl-btn-primary:hover{background:var(--border);box-shadow:0 0 15px var(--border-heavy);color:var(--fg);text-shadow:0 0 5px var(--fg)}
-.ctrl-btn-secondary{width:100%;padding:8px;font-size:9px;font-weight:600;cursor:pointer;border:1px solid var(--border);background:var(--bg-card);color:var(--fg-dim);font-family:var(--mono);text-transform:uppercase;letter-spacing:0.08em;transition:all 0.2s}
-.ctrl-btn-secondary:hover{background:var(--border);color:var(--fg);box-shadow:0 0 8px var(--border)}
-
-/* 代理列表区域 */
-.proxy-section{display:block}
-.proxy-header{position:sticky;top:0;z-index:100;background:var(--bg);padding:20px 0 16px;border-bottom:1px solid var(--border-heavy);display:flex;align-items:center;justify-content:space-between;gap:24px;backdrop-filter:blur(8px);box-shadow:0 2px 0 0 rgba(0,255,65,0.2)}
-.proxy-logo-area{display:flex;align-items:baseline;gap:12px;flex-shrink:0}
-.proxy-logo{font-size:28px;font-weight:900;letter-spacing:0.2em;font-family:var(--mono);text-transform:uppercase;color:var(--fg);text-shadow:0 0 15px var(--fg),0 0 30px var(--fg);animation:glow 2s ease-in-out infinite alternate}
-@keyframes glow{0%{text-shadow:0 0 15px var(--fg),0 0 30px var(--fg)}100%{text-shadow:0 0 20px var(--fg),0 0 40px var(--fg),0 0 60px var(--fg)}}
-.user-badge{font-size:10px;color:var(--fg-dim);font-family:var(--mono);letter-spacing:0.08em;opacity:0.6}
-.proxy-content{}
-.header-actions{display:flex;gap:8px;align-items:center;flex-shrink:0}
-
-/* 响应式：屏幕小于1200px时变为单列 */
-@media (max-width: 1200px) {
-  .content-grid{grid-template-columns:1fr;height:auto}
-  .sidebar{overflow-y:visible;padding-right:0}
-  .main-content{overflow:visible}
-  .proxy-section{height:auto;overflow:visible}
-  .proxy-content{overflow-y:visible}
+html,body{min-height:100%}
+body{
+  background:radial-gradient(circle at top,#fbf6ec 0%,var(--bg) 54%,#e9dcc4 100%);
+  color:var(--fg);
+  font-family:var(--sans);
+  font-size:14px;
+  line-height:1.6;
+  -webkit-font-smoothing:antialiased;
+  position:relative;
 }
-
-/* Health Grid - 侧边栏紧凑布局 */
-.health-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:1px;background:var(--bg);border:1px solid var(--border);margin-bottom:10px;box-shadow:0 0 20px rgba(0,255,65,0.1)}
-.health-card{background:var(--bg-card);padding:8px 10px;position:relative;border:1px solid var(--border)}
-.health-label{font-size:8px;text-transform:uppercase;letter-spacing:0.15em;color:var(--fg-dim);margin-bottom:4px;font-weight:600;font-family:var(--mono)}
-.health-value{font-size:18px;font-weight:700;font-family:var(--mono);line-height:1;letter-spacing:0.05em;color:var(--fg);text-shadow:0 0 10px var(--fg)}
-.health-status{position:absolute;top:16px;right:16px;width:8px;height:8px;border-radius:50%}
-.health-status.healthy{background:var(--green);box-shadow:0 0 8px var(--green)}
-.health-status.warning{background:var(--orange);box-shadow:0 0 8px var(--orange)}
-.health-status.critical{background:var(--red);box-shadow:0 0 8px var(--red)}
-.health-status.emergency{background:var(--red);box-shadow:0 0 15px var(--red),0 0 0 3px rgba(255,0,51,0.3);animation:pulse 1s infinite}
-.health-meta{font-size:8px;color:var(--gray-5);margin-top:3px;font-family:var(--mono)}
-
+body::before{
+  content:'';
+  position:fixed;
+  inset:0;
+  background:
+    radial-gradient(circle at 86% 12%,rgba(224,177,94,0.18),transparent 22%),
+    radial-gradient(circle at 14% 82%,rgba(45,106,79,0.12),transparent 24%);
+  pointer-events:none;
+}
+body::after{
+  content:'';
+  position:fixed;
+  inset:auto auto -180px -120px;
+  width:420px;
+  height:420px;
+  border-radius:50%;
+  background:radial-gradient(circle,rgba(45,106,79,0.14) 0%,rgba(45,106,79,0) 70%);
+  pointer-events:none;
+}
+a{color:inherit}
+button,select,input{font:inherit}
+.layout{max-width:1760px;margin:0 auto;padding:24px 28px 32px;position:relative;z-index:1}
+.content-grid{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:24px;align-items:start}
+.main-content,.sidebar{min-width:0}
+.sidebar{position:sticky;top:24px}
+.proxy-section{display:flex;flex-direction:column;gap:24px}
+.proxy-header{
+  position:sticky;
+  top:18px;
+  z-index:100;
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:20px;
+  padding:24px 28px;
+  background:rgba(253,251,247,0.82);
+  border:1px solid rgba(232,221,212,0.9);
+  border-radius:var(--radius-xl);
+  box-shadow:var(--shadow-sm);
+  backdrop-filter:blur(16px);
+}
+.proxy-logo-area{display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap}
+.proxy-logo-block{display:flex;flex-direction:column;gap:6px}
+.proxy-tag{
+  display:inline-flex;
+  align-items:center;
+  width:max-content;
+  padding:6px 12px;
+  border-radius:var(--radius-pill);
+  background:var(--primary-soft);
+  color:var(--primary);
+  font-size:11px;
+  font-weight:800;
+  letter-spacing:0.08em;
+  text-transform:uppercase;
+}
+.proxy-logo{
+  font-size:clamp(30px,4.2vw,44px);
+  line-height:1;
+  font-weight:800;
+  letter-spacing:-0.04em;
+  color:var(--fg);
+}
+.proxy-subtitle{font-size:13px;color:var(--fg-dim)}
+.user-badge{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  min-height:38px;
+  padding:0 14px;
+  border-radius:var(--radius-pill);
+  background:var(--bg-muted);
+  color:var(--fg-dim);
+  font-family:var(--mono);
+  font-size:11px;
+  font-weight:700;
+  letter-spacing:0.04em;
+  text-transform:uppercase;
+}
+.header-actions{display:flex;gap:10px;align-items:center;justify-content:flex-end;flex-wrap:wrap}
+.proxy-content{min-width:0}
+.tab,.filter-select{
+  min-height:42px;
+  padding:0 16px;
+  border-radius:var(--radius-pill);
+  border:1px solid var(--border);
+  background:var(--bg-card-solid);
+  color:var(--fg-dim);
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  text-decoration:none;
+  font-size:12px;
+  font-weight:700;
+  letter-spacing:0.02em;
+  transition:all 0.2s ease;
+  box-shadow:var(--shadow-xs);
+}
+.tab:hover,.filter-select:hover{
+  transform:translateY(-1px);
+  border-color:var(--border-strong);
+  background:var(--bg-hover);
+  color:var(--fg);
+  box-shadow:var(--shadow-sm);
+}
+.tab:active{transform:translateY(0)}
+.tab-accent{
+  color:var(--primary);
+  border-color:rgba(45,106,79,0.16);
+  background:var(--primary-soft);
+}
+.icon-tab{width:42px;padding:0}
+.filter-select{
+  appearance:none;
+  padding-right:40px;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%232d6a4f' d='M6 9L1 4h10z'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;
+  background-position:right 14px center;
+}
+.filter-select:focus{
+  outline:none;
+  border-color:rgba(45,106,79,0.42);
+  box-shadow:0 0 0 4px rgba(45,106,79,0.12);
+}
+.filter-select option{background:var(--bg-card-solid);color:var(--fg)}
+#proxy-table-wrap{
+  background:var(--bg-card-solid);
+  border:1px solid var(--border);
+  border-radius:var(--radius-xl);
+  box-shadow:var(--shadow-md);
+  overflow:auto;
+}
+table{
+  width:100%;
+  min-width:920px;
+  border-collapse:collapse;
+  background:transparent;
+}
+thead{background:transparent}
+th{
+  position:sticky;
+  top:0;
+  z-index:10;
+  padding:16px 18px;
+  text-align:left;
+  font-size:11px;
+  text-transform:uppercase;
+  letter-spacing:0.08em;
+  color:var(--fg-soft);
+  font-weight:800;
+  background:rgba(248,243,232,0.96);
+  backdrop-filter:blur(10px);
+  box-shadow:inset 0 -1px 0 var(--border);
+}
+td{
+  padding:16px 18px;
+  border-top:1px solid rgba(232,221,212,0.78);
+  color:var(--fg-dim);
+  vertical-align:middle;
+}
+tr:hover{background:rgba(45,106,79,0.03)}
+.cell-mono{font-family:var(--mono);font-size:12px}
+.cell-grade{font-weight:800;font-size:16px}
+.cell-clickable{cursor:pointer;transition:background 0.2s ease,color 0.2s ease}
+.cell-clickable:hover{background:var(--primary-soft)!important;color:var(--primary-strong)!important}
+.cell-clickable:active{background:rgba(45,106,79,0.18)!important}
+.grade-s{color:var(--primary-strong)}
+.grade-a{color:#9a6a1d}
+.grade-b{color:#b96d35}
+.grade-c{color:var(--red)}
+.badge{
+  display:inline-flex;
+  align-items:center;
+  padding:5px 10px;
+  border-radius:var(--radius-pill);
+  font-size:10px;
+  font-weight:800;
+  text-transform:uppercase;
+  letter-spacing:0.08em;
+  border:1px solid transparent;
+  font-family:var(--mono);
+}
+.badge-http{
+  border-color:rgba(139,115,85,0.18);
+  color:var(--fg-dim);
+  background:rgba(139,115,85,0.08);
+}
+.badge-socks5{
+  background:var(--primary-soft);
+  color:var(--primary-strong);
+  border-color:rgba(45,106,79,0.16);
+}
+.source-badge{
+  display:inline-flex;
+  align-items:center;
+  padding:4px 8px;
+  margin-left:6px;
+  border-radius:var(--radius-pill);
+  background:rgba(224,177,94,0.22);
+  color:#8a6215;
+  font-size:10px;
+  font-weight:800;
+  letter-spacing:0.04em;
+}
+.row-custom td:first-child{box-shadow:inset 3px 0 0 var(--yellow)}
+.control-panel,.quality-bar,.sidebar .section{
+  background:var(--bg-card-solid);
+  border:1px solid var(--border);
+  border-radius:var(--radius-xl);
+  padding:20px;
+  box-shadow:var(--shadow-sm);
+}
+.sidebar>*:not(:last-child){margin-bottom:18px}
+.control-header,.section-header{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  margin-bottom:16px;
+  padding-bottom:12px;
+  border-bottom:1px solid var(--border);
+}
+.control-title,.section-title,.quality-bar-title{
+  font-size:12px;
+  font-weight:800;
+  letter-spacing:0.08em;
+  text-transform:uppercase;
+  color:var(--fg);
+}
+.control-ops{display:flex;gap:10px;flex-wrap:wrap}
+.ctrl-btn-primary,.ctrl-btn-secondary,.modal-actions .btn{
+  flex:1;
+  min-height:44px;
+  padding:0 16px;
+  border-radius:var(--radius-pill);
+  border:1px solid transparent;
+  cursor:pointer;
+  transition:all 0.2s ease;
+  font-size:12px;
+  font-weight:800;
+  letter-spacing:0.03em;
+}
+.ctrl-btn-primary,.modal-actions .btn{
+  background:linear-gradient(135deg,var(--primary),var(--primary-strong));
+  color:#fff;
+  box-shadow:var(--shadow-xs);
+}
+.ctrl-btn-primary:hover,.modal-actions .btn:hover{
+  transform:translateY(-1px);
+  box-shadow:var(--shadow-sm);
+}
+.ctrl-btn-secondary,.modal-actions .btn-secondary{
+  background:var(--bg-card-solid);
+  color:var(--fg-dim);
+  border-color:var(--border);
+}
+.ctrl-btn-secondary:hover,.modal-actions .btn-secondary:hover{
+  background:var(--bg-hover);
+  border-color:var(--border-strong);
+  color:var(--fg);
+}
+.panel-label{
+  margin:4px 0 10px;
+  font-size:11px;
+  font-weight:800;
+  letter-spacing:0.08em;
+  text-transform:uppercase;
+  color:var(--primary);
+}
+.panel-label.accent{color:#9a6a1d}
+.health-grid{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:14px;
+  background:transparent;
+  border:none;
+  box-shadow:none;
+}
+.health-grid.health-grid-wide{grid-template-columns:repeat(3,minmax(0,1fr))}
+.health-card{
+  position:relative;
+  padding:18px 18px 16px;
+  background:var(--bg-card-solid);
+  border:1px solid var(--border);
+  border-radius:var(--radius-lg);
+  box-shadow:var(--shadow-xs);
+  overflow:hidden;
+}
+.health-card::before{
+  content:'';
+  position:absolute;
+  inset:0 auto 0 0;
+  width:4px;
+  background:rgba(45,106,79,0.18);
+}
+.health-label{
+  font-size:11px;
+  text-transform:uppercase;
+  letter-spacing:0.08em;
+  color:var(--fg-soft);
+  margin-bottom:8px;
+  font-weight:800;
+}
+.health-value{
+  font-size:28px;
+  font-weight:800;
+  line-height:1;
+  letter-spacing:-0.04em;
+  color:var(--fg);
+}
+.health-value.health-state{font-size:20px;text-transform:uppercase}
+.health-meta{
+  font-size:11px;
+  color:var(--fg-soft);
+  margin-top:8px;
+  font-family:var(--mono);
+}
+.health-status{
+  position:absolute;
+  top:18px;
+  right:18px;
+  width:10px;
+  height:10px;
+  border-radius:50%;
+}
+.health-status.healthy{background:var(--green);box-shadow:0 0 0 4px rgba(124,176,138,0.18)}
+.health-status.warning{background:var(--yellow);box-shadow:0 0 0 4px rgba(224,177,94,0.18)}
+.health-status.critical{background:var(--orange);box-shadow:0 0 0 4px rgba(222,153,99,0.18)}
+.health-status.emergency{background:var(--red);box-shadow:0 0 0 4px rgba(217,120,104,0.18);animation:pulse 1s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.6}}
-
-/* Tabs/按钮样式 */
-.tab{padding:8px 16px;min-height:36px;font-size:10px;font-weight:600;cursor:pointer;border:1px solid var(--border);background:var(--bg-card);color:var(--fg-dim);font-family:var(--mono);transition:all 0.2s;text-transform:uppercase;letter-spacing:0.05em;display:inline-flex;align-items:center;justify-content:center;text-decoration:none;box-sizing:border-box}
-.tab:hover{background:var(--border);color:var(--fg);box-shadow:0 0 8px var(--border)}
-
-/* 筛选下拉框 */
-.filter-select{padding:8px 16px;min-height:36px;font-size:10px;font-weight:600;cursor:pointer;border:1px solid var(--border);background:var(--bg-card);color:var(--fg-dim);font-family:var(--mono);text-transform:uppercase;letter-spacing:0.05em;transition:all 0.2s;outline:none;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2300ff41' d='M6 9L1 4h10z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 8px center;padding-right:32px}
-.filter-select:hover{background-color:var(--border);color:var(--fg);box-shadow:0 0 8px var(--border)}
-.filter-select option{background:var(--bg-card);color:var(--fg-dim)}
-
-/* Quality Bar - 侧边栏紧凑布局 */
-.quality-bar{background:var(--bg-card);border:1px solid var(--border);padding:16px;margin-bottom:16px;box-shadow:0 0 15px rgba(0,255,65,0.08)}
-.quality-bar-title{font-size:8px;text-transform:uppercase;letter-spacing:0.15em;color:var(--fg-dim);margin-bottom:10px;font-weight:600}
-.quality-visual{display:flex;height:20px;border:1px solid var(--border);overflow:hidden;box-shadow:inset 0 0 10px rgba(0,255,65,0.1)}
-.quality-segment{display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;font-family:var(--mono);color:#000;transition:width 0.3s;text-shadow:none}
-.quality-s{background:var(--green);box-shadow:0 0 10px var(--green)}
-.quality-a{background:var(--yellow);box-shadow:0 0 10px var(--yellow)}
-.quality-b{background:var(--orange);box-shadow:0 0 10px var(--orange)}
-.quality-c{background:var(--red);box-shadow:0 0 10px var(--red)}
-.quality-legend{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
-.quality-legend-item{font-size:9px;font-family:var(--mono);color:var(--fg-dim)}
-.quality-legend-dot{display:inline-block;width:6px;height:6px;margin-right:5px;box-shadow:0 0 4px currentColor}
-
-/* 操作按钮样式 */
-.btn-danger{border:1px solid var(--red);color:var(--red);padding:5px 10px;font-size:9px;text-transform:uppercase;letter-spacing:0.08em;background:var(--bg-card);cursor:pointer;transition:all 0.2s}
-.btn-danger:hover{background:var(--red);color:#000;box-shadow:0 0 10px var(--red)}
-.btn-action{border:1px solid var(--border);color:var(--fg-dim);padding:5px 10px;font-size:9px;text-transform:uppercase;letter-spacing:0.08em;background:var(--bg-card);margin-left:6px;cursor:pointer;transition:all 0.2s}
-.btn-action:hover{background:var(--border);color:var(--fg);box-shadow:0 0 8px var(--border)}
-
-/* Table */
-table{width:100%;border-collapse:collapse;font-size:11px;font-family:var(--mono);border:1px solid var(--border);background:var(--bg-card)}
-thead{position:sticky;top:78px;z-index:50;border-bottom:1px solid var(--border-heavy);background:var(--bg-elevated);box-shadow:0 2px 8px rgba(0,0,0,0.3)}
-th{padding:10px 12px;text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:0.12em;color:var(--fg-dim);font-weight:600}
-td{padding:12px;border-bottom:1px solid var(--border);color:var(--fg-dim)}
-tr:last-child td{border-bottom:none}
-tr:hover{background:var(--gray-2);box-shadow:inset 0 0 20px rgba(0,255,65,0.05)}
-.cell-mono{font-family:var(--mono);font-size:10px}
-.cell-grade{font-weight:700;font-size:14px}
-.cell-clickable{cursor:pointer;transition:all 0.2s}
-.cell-clickable:hover{background:var(--border)!important;color:var(--fg)!important;box-shadow:0 0 8px var(--border)!important}
-.cell-clickable:active{background:var(--border-heavy)!important}
-.grade-s{color:var(--green);text-shadow:0 0 8px var(--green)}
-.grade-a{color:var(--yellow);text-shadow:0 0 8px var(--yellow)}
-.grade-b{color:var(--orange);text-shadow:0 0 8px var(--orange)}
-.grade-c{color:var(--red);text-shadow:0 0 8px var(--red)}
-.badge{display:inline-block;padding:3px 8px;font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;border:1px solid;font-family:var(--mono)}
-.badge-http{border-color:var(--fg-dim);color:var(--fg-dim);background:transparent}
-.badge-socks5{background:var(--fg-dim);color:#000;border-color:var(--fg-dim);box-shadow:0 0 6px var(--fg-dim)}
-.latency{font-weight:600}
-.latency-excellent{color:var(--green)}
-.latency-good{color:#333}
-.latency-fair{color:#666}
-.latency-poor{color:var(--red)}
-
-/* Modal */
-.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.95);backdrop-filter:blur(10px);z-index:100;align-items:center;justify-content:center}
+.quality-bar-title{margin-bottom:14px}
+.quality-visual{
+  display:flex;
+  height:22px;
+  border-radius:var(--radius-pill);
+  overflow:hidden;
+  background:var(--bg-soft);
+  border:1px solid var(--border);
+}
+.quality-segment{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  font-size:10px;
+  font-weight:800;
+  font-family:var(--mono);
+  color:#fff;
+  transition:width 0.3s ease;
+}
+.quality-s{background:linear-gradient(135deg,var(--primary),var(--primary-strong))}
+.quality-a{background:#a6752d}
+.quality-b{background:#c67b43}
+.quality-c{background:var(--red)}
+.quality-legend{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:10px;
+  margin-top:14px;
+}
+.quality-legend-item{font-size:11px;color:var(--fg-dim)}
+.quality-legend-dot{
+  display:inline-block;
+  width:8px;
+  height:8px;
+  margin-right:6px;
+  border-radius:50%;
+}
+.btn-danger,.btn-action{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  min-height:32px;
+  padding:0 12px;
+  border-radius:var(--radius-pill);
+  font-size:10px;
+  font-weight:800;
+  letter-spacing:0.04em;
+  cursor:pointer;
+  transition:all 0.2s ease;
+  background:var(--bg-card-solid);
+}
+.btn-action{
+  border:1px solid var(--border);
+  color:var(--fg-dim);
+  margin-left:8px;
+}
+.btn-action:hover{background:var(--bg-hover);border-color:var(--border-strong);color:var(--fg)}
+.btn-danger{
+  border:1px solid rgba(217,120,104,0.28);
+  color:var(--red);
+  background:var(--red-soft);
+}
+.btn-danger:hover{background:var(--red);border-color:var(--red);color:#fff}
+.modal-overlay{
+  display:none;
+  position:fixed;
+  inset:0;
+  padding:24px;
+  background:rgba(28,25,23,0.18);
+  backdrop-filter:blur(10px);
+  z-index:100;
+  align-items:center;
+  justify-content:center;
+}
 .modal-overlay.show{display:flex}
-.modal{background:var(--bg-elevated);border:1px solid var(--border-heavy);padding:40px;width:700px;box-shadow:0 0 40px rgba(0,255,65,0.3);max-height:90vh;overflow-y:auto}
-.modal-title{font-size:20px;font-weight:700;margin-bottom:28px;letter-spacing:0.08em;text-transform:uppercase;color:var(--fg);text-shadow:0 0 10px var(--fg)}
-.form-section{margin-bottom:28px}
-.form-section-title{font-size:9px;text-transform:uppercase;letter-spacing:0.12em;color:var(--fg-dim);margin-bottom:12px;font-weight:600;padding-bottom:8px;border-bottom:1px solid var(--border)}
-.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-.form-group{display:flex;flex-direction:column}
-.form-group label{font-size:9px;text-transform:uppercase;letter-spacing:0.08em;color:var(--fg-dim);margin-bottom:6px;font-weight:600}
-.form-group input{padding:10px;background:var(--bg-card);border:1px solid var(--border);font-size:12px;font-family:var(--mono);color:var(--fg);outline:none;transition:all 0.2s}
-.form-group input:focus{border-color:var(--border-heavy);background:var(--bg-elevated);box-shadow:0 0 10px var(--border-heavy)}
-.form-help{font-size:9px;color:var(--gray-5);margin-top:4px;font-family:var(--mono)}
-.modal-actions{display:flex;gap:12px;margin-top:28px;padding-top:28px;border-top:1px solid var(--border)}
-.modal-actions .btn{flex:1;padding:12px 24px;font-size:11px;font-weight:600;cursor:pointer;border:1px solid var(--border-heavy);background:var(--bg-card);color:var(--fg);font-family:var(--mono);text-transform:uppercase;letter-spacing:0.08em;transition:all 0.2s}
-.modal-actions .btn:hover{background:var(--border);box-shadow:0 0 15px var(--border-heavy);color:var(--fg);text-shadow:0 0 5px var(--fg)}
-.modal-actions .btn-secondary{border:1px solid var(--border);background:var(--bg-card);color:var(--fg-dim)}
-.modal-actions .btn-secondary:hover{background:var(--gray-2);color:var(--fg);box-shadow:0 0 10px var(--border)}
-
-/* Log - 适配侧边栏布局 */
-.log-box{padding:12px;background:var(--bg);border:1px solid var(--border);font-family:var(--mono);font-size:10px;color:var(--fg-dim);height:350px;overflow-y:auto;line-height:1.8;box-shadow:inset 0 0 20px rgba(0,255,65,0.05)}
-.log-box::-webkit-scrollbar{width:4px}
-.log-box::-webkit-scrollbar-track{background:var(--bg)}
-.log-box::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
-.log-box::-webkit-scrollbar-thumb:hover{background:var(--border-heavy)}
-.log-line{padding:3px 0;opacity:0.85}
-.log-line.error{color:var(--red);font-weight:600;text-shadow:0 0 5px var(--red)}
-.log-line.success{color:var(--green);text-shadow:0 0 5px var(--green)}
-
-/* 侧边栏样式 */
-.sidebar>*:not(:last-child){margin-bottom:16px}
-.sidebar .section{margin-bottom:0;border:1px solid var(--border);background:var(--bg-card);padding:16px;box-shadow:0 0 15px rgba(0,255,65,0.1)}
-.sidebar .section-header{padding-bottom:10px;margin-bottom:12px;border-bottom:1px solid var(--border)}
-.sidebar .section-title{font-size:12px;letter-spacing:0.12em}
-
-/* 响应式布局 */
-@media (max-width: 1200px) {
+.modal{
+  background:var(--bg-card-solid);
+  border:1px solid var(--border);
+  border-radius:32px;
+  padding:32px;
+  width:min(700px,100%);
+  box-shadow:var(--shadow-lg);
+  max-height:90vh;
+  overflow-y:auto;
+}
+.modal-title{
+  font-size:26px;
+  font-weight:800;
+  letter-spacing:-0.03em;
+  color:var(--fg);
+  margin-bottom:24px;
+}
+.form-section{margin-bottom:24px}
+.form-section-title{
+  font-size:11px;
+  text-transform:uppercase;
+  letter-spacing:0.08em;
+  color:var(--primary);
+  margin-bottom:14px;
+  font-weight:800;
+}
+.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.form-group{display:flex;flex-direction:column;gap:8px}
+.form-group label{font-size:12px;color:var(--fg);font-weight:700}
+.form-group input,.form-select{
+  width:100%;
+  min-height:44px;
+  padding:0 14px;
+  border:1px solid var(--border);
+  border-radius:var(--radius-md);
+  background:var(--bg-soft);
+  color:var(--fg);
+  outline:none;
+  transition:all 0.2s ease;
+}
+.form-group input:focus,.form-select:focus{
+  border-color:rgba(45,106,79,0.42);
+  background:var(--bg-card-solid);
+  box-shadow:0 0 0 4px rgba(45,106,79,0.12);
+}
+.form-help{font-size:11px;color:var(--fg-soft)}
+.modal-note{color:var(--fg-dim);font-size:13px;margin-bottom:18px;line-height:1.7}
+.modal-note-sub{display:block;color:var(--fg-soft);font-size:12px;margin-top:6px}
+.modal-actions{
+  display:flex;
+  gap:12px;
+  margin-top:28px;
+  padding-top:22px;
+  border-top:1px solid var(--border);
+}
+.upload-dropzone{
+  border:1px dashed var(--border-strong);
+  border-radius:var(--radius-lg);
+  padding:20px;
+  text-align:center;
+  cursor:pointer;
+  transition:all 0.2s ease;
+  background:rgba(255,255,255,0.46);
+}
+.upload-dropzone:hover{background:var(--primary-soft);border-color:rgba(45,106,79,0.35)}
+.upload-label{color:var(--fg-dim);font-size:12px}
+.file-selected{color:var(--primary-strong);font-weight:800}
+.file-selected-meta{font-size:11px;color:var(--fg-soft)}
+#sub-list{
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+  max-height:240px;
+  overflow-y:auto;
+  padding-right:4px;
+}
+.sub-status{margin-top:10px;font-size:11px;color:var(--fg-soft)}
+.subscription-empty{
+  color:var(--fg-soft);
+  text-align:center;
+  padding:12px;
+  border-radius:var(--radius-lg);
+  background:var(--bg-soft);
+}
+.subscription-item{
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:12px;
+  padding:12px 14px;
+  border:1px solid var(--border);
+  border-radius:var(--radius-lg);
+  background:var(--bg-soft);
+}
+.subscription-item-main{flex:1;min-width:0}
+.subscription-name-row{
+  display:flex;
+  align-items:center;
+  flex-wrap:wrap;
+  gap:8px;
+  margin-bottom:4px;
+}
+.subscription-status{font-size:12px;font-weight:800}
+.subscription-status.active{color:var(--primary)}
+.subscription-status.inactive{color:var(--fg-soft)}
+.subscription-name{font-weight:800;color:var(--fg)}
+.subscription-stats{font-size:11px;color:var(--fg-soft)}
+.subscription-badge{
+  display:inline-flex;
+  align-items:center;
+  padding:4px 8px;
+  border-radius:var(--radius-pill);
+  font-size:10px;
+  font-weight:800;
+}
+.subscription-badge-warm{background:rgba(222,153,99,0.18);color:#9c5c24}
+.subscription-actions{display:flex;gap:8px;flex-shrink:0}
+.icon-btn{
+  width:30px;
+  height:30px;
+  border-radius:50%;
+  border:1px solid var(--border);
+  background:var(--bg-card-solid);
+  color:var(--fg-dim);
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  cursor:pointer;
+  transition:all 0.2s ease;
+}
+.icon-btn:hover{background:var(--bg-hover);border-color:var(--border-strong);color:var(--fg)}
+.icon-btn-danger{
+  border-color:rgba(217,120,104,0.28);
+  color:var(--red);
+  background:var(--red-soft);
+}
+.icon-btn-danger:hover{background:var(--red);border-color:var(--red);color:#fff}
+.log-box{
+  padding:14px 16px;
+  background:var(--bg-soft);
+  border:1px solid var(--border);
+  border-radius:var(--radius-lg);
+  font-family:var(--mono);
+  font-size:11px;
+  color:var(--fg-dim);
+  height:360px;
+  overflow-y:auto;
+  line-height:1.8;
+}
+.log-box::-webkit-scrollbar,#sub-list::-webkit-scrollbar,.modal::-webkit-scrollbar{width:6px}
+.log-box::-webkit-scrollbar-thumb,#sub-list::-webkit-scrollbar-thumb,.modal::-webkit-scrollbar-thumb{
+  background:rgba(138,127,114,0.36);
+  border-radius:999px;
+}
+.log-box::-webkit-scrollbar-track,#sub-list::-webkit-scrollbar-track,.modal::-webkit-scrollbar-track{background:transparent}
+.log-line{padding:3px 0;opacity:0.88}
+.log-line.error{color:var(--red);font-weight:700}
+.log-line.success{color:var(--primary)}
+.log-meta{
+  font-size:11px;
+  color:var(--fg-soft);
+  font-family:var(--mono);
+  margin-top:10px;
+  text-align:center;
+}
+.empty{
+  padding:56px 24px;
+  text-align:center;
+  color:var(--fg-soft);
+  font-size:13px;
+}
+.admin-only{display:none}
+.toast{
+  position:fixed;
+  bottom:32px;
+  left:50%;
+  transform:translateX(-50%) translateY(100px);
+  background:linear-gradient(135deg,var(--primary),var(--primary-strong));
+  color:#fff;
+  padding:12px 22px;
+  border-radius:var(--radius-pill);
+  font-size:12px;
+  font-weight:800;
+  font-family:var(--sans);
+  opacity:0;
+  transition:all 0.3s ease;
+  z-index:1000;
+  pointer-events:none;
+  box-shadow:var(--shadow-md);
+}
+.toast.show{transform:translateX(-50%) translateY(0);opacity:1}
+@media (max-width: 1280px) {
   .content-grid{grid-template-columns:1fr}
   .sidebar{position:static}
-  .health-grid{grid-template-columns:repeat(4,1fr)}
-  .health-card{padding:10px 12px}
-  .health-value{font-size:32px}
-  .log-box{height:400px}
-  .sidebar .section{border:1px solid var(--border)}
+  .health-grid.health-grid-wide{grid-template-columns:repeat(3,minmax(0,1fr))}
 }
-
-.empty{padding:48px;text-align:center;color:var(--gray-4);font-size:12px;font-family:var(--mono);text-transform:uppercase;letter-spacing:0.08em}
-
-/* 权限控制 - 默认隐藏管理员功能 */
-.admin-only{display:none}
-
-/* Toast 提示 */
-.toast{position:fixed;bottom:32px;left:50%;transform:translateX(-50%) translateY(100px);background:var(--fg);color:#000;padding:12px 24px;font-size:11px;font-weight:600;font-family:var(--mono);opacity:0;transition:all 0.3s;z-index:1000;pointer-events:none;box-shadow:0 0 20px var(--fg);text-transform:uppercase;letter-spacing:0.05em}
-.toast.show{transform:translateX(-50%) translateY(0);opacity:1}
+@media (max-width: 900px) {
+  .layout{padding:18px 16px 24px}
+  .proxy-header{top:12px;padding:20px;flex-direction:column}
+  .header-actions{width:100%;justify-content:flex-start}
+  .form-grid{grid-template-columns:1fr}
+  .modal{padding:24px}
+  .modal-actions{flex-direction:column}
+}
+@media (max-width: 640px) {
+  .health-grid,.health-grid.health-grid-wide{grid-template-columns:1fr}
+  .control-ops{flex-direction:column}
+  .tab,.filter-select{flex:1 1 calc(50% - 10px)}
+  .subscription-item{flex-direction:column}
+  .subscription-actions{width:100%;justify-content:flex-end}
+}
 </style>
 </head>
 <body>
@@ -207,8 +678,11 @@ tr:hover{background:var(--gray-2);box-shadow:inset 0 0 20px rgba(0,255,65,0.05)}
       <div class="proxy-section">
         <div class="proxy-header">
           <div class="proxy-logo-area">
-            <div class="proxy-logo">[ GoProxy ]</div>
-            <span id="user-mode" class="user-badge">guest</span>
+            <div class="proxy-logo-block">
+              <div class="proxy-tag">Unified Proxy Gateway</div>
+              <div class="proxy-logo">ProxyGate</div>
+            </div>
+            <span id="user-mode" class="user-badge">Guest</span>
           </div>
           <div class="header-actions">
             <select class="filter-select" id="protocol-filter" onchange="setProtocolFilter(this.value)">
@@ -219,16 +693,16 @@ tr:hover{background:var(--gray-2);box-shadow:inset 0 0 20px rgba(0,255,65,0.05)}
             <select class="filter-select" id="country-filter" onchange="setCountryFilter(this.value)">
               <option value="" id="country-filter-label">出口国家</option>
             </select>
-            <button class="tab" onclick="toggleLang()" id="lang-btn">[ EN ]</button>
-            <a href="https://github.com/isboyjc/ProxyGo" target="_blank" class="tab" title="GitHub">
+            <button class="tab" onclick="toggleLang()" id="lang-btn">EN</button>
+            <a href="https://github.com/ruruamour/ProxyGate" target="_blank" class="tab icon-tab" title="GitHub">
               <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="vertical-align: middle;">
                 <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
               </svg>
             </a>
-            <button class="tab guest-only" onclick="openContributeModal()" style="color:var(--yellow)" data-i18n="contribute.nav">贡献订阅</button>
+            <button class="tab tab-accent guest-only" onclick="openContributeModal()" data-i18n="contribute.nav">贡献订阅</button>
             <a href="/login" class="tab" id="login-link" style="display: none;" data-i18n="nav.login">登录</a>
             <a href="/logout" class="tab admin-only" data-i18n="nav.logout">退出</a>
-            <button class="tab admin-only" onclick="openSettings()" title="" data-i18n-title="contribute.settings" style="padding:4px 8px">
+            <button class="tab icon-tab admin-only" onclick="openSettings()" title="" data-i18n-title="contribute.settings">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
             </button>
           </div>
@@ -242,7 +716,7 @@ tr:hover{background:var(--gray-2);box-shadow:inset 0 0 20px rgba(0,255,65,0.05)}
     <aside class="sidebar">
       <div class="control-panel admin-only">
         <div class="control-header">
-          <div class="control-title">[ CONTROL_PANEL ]</div>
+          <div class="control-title" data-i18n="control.title">控制中心</div>
         </div>
         <div class="control-ops">
           <button class="ctrl-btn-primary" onclick="triggerFetch()" data-i18n="actions.fetch">抓取代理</button>
@@ -254,22 +728,22 @@ tr:hover{background:var(--gray-2);box-shadow:inset 0 0 20px rgba(0,255,65,0.05)}
       <!-- 订阅管理面板 -->
       <div class="control-panel admin-only" style="margin-bottom:20px">
         <div class="control-header">
-          <div class="control-title">[ SUBSCRIPTIONS ]</div>
+          <div class="control-title" data-i18n="sub.title">订阅管理</div>
         </div>
-        <div id="sub-list" style="margin-bottom:8px;font-size:11px;max-height:200px;overflow-y:auto"></div>
+        <div id="sub-list"></div>
         <div class="control-ops">
           <button class="ctrl-btn-primary" onclick="openSubModal()" data-i18n="sub.add">添加订阅</button>
           <button class="ctrl-btn-secondary" onclick="refreshAllSubs()" data-i18n="sub.refresh_all">刷新所有订阅</button>
         </div>
-        <div id="sub-status" style="margin-top:8px;font-size:10px;color:var(--fg-dim)"></div>
+        <div id="sub-status" class="sub-status"></div>
       </div>
 
       <!-- 免费代理池 -->
-      <div style="font-size:8px;color:var(--fg-dim);letter-spacing:0.1em;text-transform:uppercase;margin-bottom:2px;font-weight:600" data-i18n="health.free_pool">[ FREE_POOL ]</div>
+      <div class="panel-label" data-i18n="health.free_pool">免费池</div>
       <div class="health-grid">
         <div class="health-card">
           <div class="health-label" data-i18n="health.status">池子状态</div>
-          <div class="health-value" id="pool-state" style="font-size:18px;text-transform:uppercase">—</div>
+          <div class="health-value health-state" id="pool-state">—</div>
           <div class="health-status" id="pool-status-dot"></div>
         </div>
         <div class="health-card">
@@ -290,8 +764,8 @@ tr:hover{background:var(--gray-2);box-shadow:inset 0 0 20px rgba(0,255,65,0.05)}
       </div>
 
       <!-- 订阅代理池 -->
-      <div style="font-size:8px;color:var(--yellow);letter-spacing:0.1em;text-transform:uppercase;margin-bottom:2px;font-weight:600" data-i18n="health.sub_pool">[ SUBSCRIPTION_POOL ]</div>
-      <div class="health-grid" style="grid-template-columns:repeat(3,1fr)">
+      <div class="panel-label accent" data-i18n="health.sub_pool">订阅池</div>
+      <div class="health-grid health-grid-wide">
         <div class="health-card">
           <div class="health-label" data-i18n="health.sub_sources">订阅源</div>
           <div class="health-value" id="stat-sub-count">0</div>
@@ -318,10 +792,10 @@ tr:hover{background:var(--gray-2);box-shadow:inset 0 0 20px rgba(0,255,65,0.05)}
           <div class="quality-segment quality-c" style="width:0%"></div>
         </div>
         <div class="quality-legend">
-          <div class="quality-legend-item"><span class="quality-legend-dot" style="background:#22c55e"></span><span data-i18n="quality.grade_s">S级</span> (<span id="grade-s-count">0</span>)</div>
-          <div class="quality-legend-item"><span class="quality-legend-dot" style="background:#eab308"></span><span data-i18n="quality.grade_a">A级</span> (<span id="grade-a-count">0</span>)</div>
-          <div class="quality-legend-item"><span class="quality-legend-dot" style="background:#f97316"></span><span data-i18n="quality.grade_b">B级</span> (<span id="grade-b-count">0</span>)</div>
-          <div class="quality-legend-item"><span class="quality-legend-dot" style="background:#ef4444"></span><span data-i18n="quality.grade_c">C级</span> (<span id="grade-c-count">0</span>)</div>
+          <div class="quality-legend-item"><span class="quality-legend-dot" style="background:var(--primary)"></span><span data-i18n="quality.grade_s">S级</span> (<span id="grade-s-count">0</span>)</div>
+          <div class="quality-legend-item"><span class="quality-legend-dot" style="background:#a6752d"></span><span data-i18n="quality.grade_a">A级</span> (<span id="grade-a-count">0</span>)</div>
+          <div class="quality-legend-item"><span class="quality-legend-dot" style="background:#c67b43"></span><span data-i18n="quality.grade_b">B级</span> (<span id="grade-b-count">0</span>)</div>
+          <div class="quality-legend-item"><span class="quality-legend-dot" style="background:var(--red)"></span><span data-i18n="quality.grade_c">C级</span> (<span id="grade-c-count">0</span>)</div>
         </div>
       </div>
 
@@ -330,8 +804,8 @@ tr:hover{background:var(--gray-2);box-shadow:inset 0 0 20px rgba(0,255,65,0.05)}
           <h2 class="section-title" data-i18n="log.title">系统日志</h2>
         </div>
         <div class="log-box" id="logs-box"><span data-i18n="log.loading">加载中...</span></div>
-        <div style="font-size:10px;color:var(--gray-5);font-family:var(--mono);margin-top:8px;text-align:center">
-          <span data-i18n="log.auto_refresh_label">自动刷新</span>: <span id="log-countdown" style="color:var(--fg-dim);font-weight:600">5</span>s
+        <div class="log-meta">
+          <span data-i18n="log.auto_refresh_label">自动刷新</span>: <span id="log-countdown">5</span>s
         </div>
       </div>
     </aside>
@@ -347,7 +821,7 @@ tr:hover{background:var(--gray-2);box-shadow:inset 0 0 20px rgba(0,255,65,0.05)}
       <div class="form-grid">
         <div class="form-group" style="grid-column:1/-1">
           <label data-i18n="config.proxy_strategy">出站代理选择策略</label>
-          <select id="cfg-custom-mode" style="width:100%;padding:10px;background:var(--bg-card);border:1px solid var(--border);color:var(--fg);font-family:var(--mono);font-size:12px">
+          <select id="cfg-custom-mode" class="form-select">
             <option value="mixed_custom_priority" data-i18n="config.mode_mixed_custom">混合 · 订阅优先</option>
             <option value="mixed_free_priority" data-i18n="config.mode_mixed_free">混合 · 免费优先</option>
             <option value="mixed" data-i18n="config.mode_mixed">混合 · 平等</option>
@@ -488,12 +962,12 @@ tr:hover{background:var(--gray-2);box-shadow:inset 0 0 20px rgba(0,255,65,0.05)}
         </div>
         <div class="form-group" id="sub-file-group" style="grid-column:1/-1;display:none">
           <label data-i18n="sub.file_label">配置文件</label>
-          <div style="border:1px dashed var(--border);padding:16px;text-align:center;cursor:pointer;transition:all 0.2s"
+          <div class="upload-dropzone"
                onclick="document.getElementById('sub-file-input').click()"
-               ondragover="event.preventDefault();this.style.borderColor='var(--fg)'"
+               ondragover="event.preventDefault();this.style.borderColor='var(--primary)'"
                ondragleave="this.style.borderColor='var(--border)'"
                ondrop="event.preventDefault();this.style.borderColor='var(--border)';handleFileDrop(event)">
-            <div id="sub-file-label" style="color:var(--fg-dim);font-size:11px" data-i18n="sub.file_drop">点击选择或拖拽文件到此处</div>
+            <div id="sub-file-label" class="upload-label" data-i18n="sub.file_drop">点击选择或拖拽文件到此处</div>
           </div>
           <input type="file" id="sub-file-input" accept=".yaml,.yml,.txt,.conf,.json" style="display:none" onchange="handleFileSelect(this)">
         </div>
@@ -515,9 +989,9 @@ tr:hover{background:var(--gray-2);box-shadow:inset 0 0 20px rgba(0,255,65,0.05)}
 <div class="modal-overlay" id="contribute-modal" onclick="if(event.target===this) closeContributeModal()" style="display:none">
   <div class="modal" style="max-width:460px">
     <div class="modal-title" data-i18n="contribute.title">贡献订阅</div>
-    <div style="color:var(--fg-dim);font-size:11px;margin-bottom:16px;line-height:1.6">
+    <div class="modal-note">
       <span data-i18n="contribute.desc">分享你的代理订阅，帮助丰富代理池。</span><br>
-      <span style="color:var(--gray-5);font-size:10px" data-i18n="contribute.privacy">你的订阅仅用于此代理池，不会被用于其他渠道。连续探测无可用节点将自动移除。</span>
+      <span class="modal-note-sub" data-i18n="contribute.privacy">你的订阅仅用于此代理池，不会被用于其他渠道。连续探测无可用节点将自动移除。</span>
     </div>
     <div class="form-section">
       <div class="form-grid">
@@ -539,12 +1013,12 @@ tr:hover{background:var(--gray-2);box-shadow:inset 0 0 20px rgba(0,255,65,0.05)}
         </div>
         <div class="form-group" id="contribute-file-group" style="grid-column:1/-1;display:none">
           <label data-i18n="sub.file_label">配置文件</label>
-          <div style="border:1px dashed var(--border);padding:16px;text-align:center;cursor:pointer;transition:all 0.2s"
+          <div class="upload-dropzone"
                onclick="document.getElementById('contribute-file-input').click()"
-               ondragover="event.preventDefault();this.style.borderColor='var(--fg)'"
+               ondragover="event.preventDefault();this.style.borderColor='var(--primary)'"
                ondragleave="this.style.borderColor='var(--border)'"
                ondrop="event.preventDefault();this.style.borderColor='var(--border)';handleContributeFileDrop(event)">
-            <div id="contribute-file-label" style="color:var(--fg-dim);font-size:11px" data-i18n="sub.file_drop">点击选择或拖拽文件到此处</div>
+            <div id="contribute-file-label" class="upload-label" data-i18n="sub.file_drop">点击选择或拖拽文件到此处</div>
           </div>
           <input type="file" id="contribute-file-input" accept=".yaml,.yml,.txt,.conf,.json" style="display:none" onchange="handleContributeFileSelect(this)">
         </div>
@@ -561,6 +1035,7 @@ tr:hover{background:var(--gray-2);box-shadow:inset 0 0 20px rgba(0,255,65,0.05)}
 // 国际化翻译
 const i18n = {
   zh: {
+    'control.title': '控制中心',
     'nav.config': '配置',
     'nav.login': '登录',
     'nav.logout': '退出',
@@ -658,11 +1133,11 @@ const i18n = {
     'config.probe_interval': '探测间隔 (分钟)',
     'config.probe_interval_help': '禁用代理的唤醒探测间隔',
     'config.refresh_interval': '默认刷新间隔 (分钟)',
-    'config.refresh_interval_help': '新订阅的默���刷新周期',
+    'config.refresh_interval_help': '新订阅的默认刷新周期',
     'config.geo_filter_help': '免费代理删除，订阅代理禁用',
     // 健康面板
-    'health.free_pool': 'FREE_POOL',
-    'health.sub_pool': 'SUBSCRIPTION_POOL',
+    'health.free_pool': '免费池',
+    'health.sub_pool': '订阅池',
     'health.free_proxies': '免费代理',
     'health.sub_sources': '订阅源',
     'health.available': '可用',
@@ -674,7 +1149,7 @@ const i18n = {
     'health.not_added': '未添加',
     'health.total_nodes': '共 {0} 节点',
     // 订阅面板
-    'sub.title': 'SUBSCRIPTIONS',
+    'sub.title': '订阅管理',
     'sub.add': '添加订阅',
     'sub.refresh_all': '刷新所有订阅',
     'sub.empty': '暂无订阅',
@@ -716,6 +1191,7 @@ const i18n = {
     'msg.submit_failed': '提交失败: ',
   },
   en: {
+    'control.title': 'Control Center',
     'nav.config': 'Config',
     'nav.login': 'Login',
     'nav.logout': 'Logout',
@@ -814,8 +1290,8 @@ const i18n = {
     'config.refresh_interval': 'Default Refresh (min)',
     'config.refresh_interval_help': 'Default refresh cycle for new subscriptions',
     'config.geo_filter_help': 'Free: delete, Subscription: disable',
-    'health.free_pool': 'FREE_POOL',
-    'health.sub_pool': 'SUBSCRIPTION_POOL',
+    'health.free_pool': 'Free Pool',
+    'health.sub_pool': 'Subscription Pool',
     'health.free_proxies': 'Free Proxies',
     'health.sub_sources': 'Sources',
     'health.available': 'Available',
@@ -826,7 +1302,7 @@ const i18n = {
     'health.ready': 'Ready',
     'health.not_added': 'None',
     'health.total_nodes': '{0} total nodes',
-    'sub.title': 'SUBSCRIPTIONS',
+    'sub.title': 'Subscriptions',
     'sub.add': 'Add Subscription',
     'sub.refresh_all': 'Refresh All',
     'sub.empty': 'No subscriptions',
@@ -889,7 +1365,7 @@ function updateI18n() {
     el.title = t(key);
   });
   document.getElementById('lang-btn').textContent = currentLang === 'zh' ? 'EN' : '中';
-  document.title = currentLang === 'zh' ? 'GoProxy — 智能代理池' : 'GoProxy — Intelligent Pool';
+  document.title = currentLang === 'zh' ? 'ProxyGate — 智能代理网关' : 'ProxyGate — Intelligent Gateway';
 
   // 更新筛选下拉框标签
   const protocolLabel = document.getElementById('protocol-filter-label');
@@ -900,7 +1376,7 @@ function updateI18n() {
 
 function toggleLang() {
   currentLang = currentLang === 'zh' ? 'en' : 'zh';
-  document.getElementById('lang-btn').textContent = currentLang === 'zh' ? '[ EN ]' : '[ 中文 ]';
+  document.getElementById('lang-btn').textContent = currentLang === 'zh' ? 'EN' : '中';
   localStorage.setItem('lang', currentLang);
   updateI18n();
   if (allProxies.length > 0) {
@@ -946,7 +1422,7 @@ function updateUIByRole() {
   // 显示/隐藏管理员专属元素
   document.querySelectorAll('.admin-only').forEach(el => {
     if (isAdmin) {
-      el.style.display = 'block';
+      el.style.display = el.classList.contains('tab') ? 'inline-flex' : 'block';
     } else {
       el.style.display = 'none';
     }
@@ -963,9 +1439,9 @@ function updateUIByRole() {
   const modeEl = document.getElementById('user-mode');
   if (modeEl) {
     if (isAdmin) {
-      modeEl.textContent = 'admin';
+      modeEl.textContent = 'Admin';
     } else {
-      modeEl.textContent = 'guest';
+      modeEl.textContent = 'Guest';
     }
   }
   
@@ -1000,7 +1476,7 @@ async function refreshProxy(address) {
   const res = await api('/api/proxy/refresh', { address });
   if (res) {
     showToast(t('proxy.refresh_started'));
-    setTimeout(() => loadProxies(currentFilter), 2000);
+    setTimeout(() => loadProxies(), 2000);
   }
 }
 
@@ -1125,14 +1601,14 @@ function renderProxies(proxies) {
       const flag = p.exit_location ? getCountryFlag(p.exit_location.split(' ')[0]) : '';
       const grade = (p.quality_grade || 'C').toLowerCase();
       const latencyClass = 'grade-' + grade;
-      
-      const rowStyle = p.source === 'custom' ? ' style="border-left:2px solid var(--yellow)"' : '';
-      html += '<tr' + rowStyle + '>';
+
+      const rowClass = p.source === 'custom' ? ' class="row-custom"' : '';
+      html += '<tr' + rowClass + '>';
       html += '<td class="cell-grade grade-' + grade + '">' + (p.quality_grade || 'C') + '</td>';
       html += '<td><span class="badge badge-' + p.protocol + '">' + p.protocol.toUpperCase() + '</span>';
       if (p.source === 'custom') {
         const subName = subNameMap[p.subscription_id] || t('sub.add_title');
-        html += ' <span style="display:inline-block;background:var(--yellow);color:#000;font-size:8px;font-weight:700;padding:1px 4px;margin-left:4px;letter-spacing:0.05em">' + subName + '</span>';
+        html += ' <span class="source-badge">' + subName + '</span>';
       }
       html += '</td>';
       html += '<td class="cell-mono cell-clickable" onclick="copyToClipboard(\'' + p.address + '\')" title="Copy">' + p.address + '</td>';
@@ -1311,28 +1787,30 @@ async function loadSubscriptions() {
   if (!el || !subs) return;
 
   if (subs.length === 0) {
-    el.innerHTML = '<div style="color:var(--gray-5);text-align:center;padding:8px">' + t('sub.empty') + '</div>';
+    el.innerHTML = '<div class="subscription-empty">' + t('sub.empty') + '</div>';
     return;
   }
 
   el.innerHTML = subs.map(s => {
-    const statusColor = s.status === 'active' ? 'var(--green)' : 'var(--gray-5)';
     const statusIcon = s.status === 'active' ? '●' : '○';
+    const statusClass = s.status === 'active' ? 'subscription-status active' : 'subscription-status inactive';
     const active = s.active_count || 0;
     const disabled = s.disabled_count || 0;
     const total = active + disabled;
     const statsText = total + ' ' + t('sub.nodes') + ' · ' + active + ' ' + t('sub.available') + (disabled > 0 ? ' · ' + disabled + ' ' + t('sub.disabled_label') : '');
-    const badge = s.contributed ? '<span style="display:inline-block;background:var(--orange);color:#000;font-size:7px;font-weight:700;padding:0 3px;margin-left:4px;vertical-align:middle">' + t('sub.contributed') + '</span>' : '';
-    return '<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border)">' +
-      '<div style="flex:1;min-width:0">' +
-        '<span style="color:' + statusColor + '">' + statusIcon + '</span> ' +
-        '<span style="font-weight:600">' + (s.name||t('sub.add_title')) + '</span>' + badge +
-        '<span style="color:var(--gray-5);margin-left:8px">' + statsText + '</span>' +
+    const badge = s.contributed ? '<span class="subscription-badge subscription-badge-warm">' + t('sub.contributed') + '</span>' : '';
+    return '<div class="subscription-item">' +
+      '<div class="subscription-item-main">' +
+        '<div class="subscription-name-row">' +
+          '<span class="' + statusClass + '">' + statusIcon + '</span>' +
+          '<span class="subscription-name">' + (s.name||t('sub.add_title')) + '</span>' + badge +
+        '</div>' +
+        '<div class="subscription-stats">' + statsText + '</div>' +
       '</div>' +
-      '<div style="display:flex;gap:4px;flex-shrink:0">' +
-        '<button onclick="refreshSub(' + s.id + ')" style="background:none;border:1px solid var(--border);color:var(--fg-dim);cursor:pointer;padding:2px 6px;font-size:9px;font-family:var(--mono)">↻</button>' +
-        '<button onclick="toggleSub(' + s.id + ')" style="background:none;border:1px solid var(--border);color:var(--fg-dim);cursor:pointer;padding:2px 6px;font-size:9px;font-family:var(--mono)">' + (s.status === 'active' ? '⏸' : '▶') + '</button>' +
-        '<button onclick="deleteSub(' + s.id + ')" style="background:none;border:1px solid var(--red);color:var(--red);cursor:pointer;padding:2px 6px;font-size:9px;font-family:var(--mono)">✕</button>' +
+      '<div class="subscription-actions">' +
+        '<button class="icon-btn" onclick="refreshSub(' + s.id + ')">↻</button>' +
+        '<button class="icon-btn" onclick="toggleSub(' + s.id + ')">' + (s.status === 'active' ? '⏸' : '▶') + '</button>' +
+        '<button class="icon-btn icon-btn-danger" onclick="deleteSub(' + s.id + ')">✕</button>' +
       '</div>' +
     '</div>';
   }).join('');
@@ -1393,8 +1871,8 @@ function readSubFile(file) {
   reader.onload = function(e) {
     subFileContent = e.target.result;
     document.getElementById('sub-file-label').innerHTML =
-      '<span style="color:var(--fg)">✅ ' + file.name + '</span><br>' +
-      '<span style="font-size:9px;opacity:0.6">' + (subFileContent.length / 1024).toFixed(1) + ' KB</span>';
+      '<span class="file-selected">✅ ' + file.name + '</span><br>' +
+      '<span class="file-selected-meta">' + (subFileContent.length / 1024).toFixed(1) + ' KB</span>';
   };
   reader.readAsText(file);
 }
@@ -1506,8 +1984,8 @@ function readContributeFile(file) {
   reader.onload = function(e) {
     contributeFileContent = e.target.result;
     document.getElementById('contribute-file-label').innerHTML =
-      '<span style="color:var(--fg)">✅ ' + file.name + '</span><br>' +
-      '<span style="font-size:9px;opacity:0.6">' + (contributeFileContent.length / 1024).toFixed(1) + ' KB</span>';
+      '<span class="file-selected">✅ ' + file.name + '</span><br>' +
+      '<span class="file-selected-meta">' + (contributeFileContent.length / 1024).toFixed(1) + ' KB</span>';
   };
   reader.readAsText(file);
 }

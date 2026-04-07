@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -18,8 +19,8 @@ import (
 	"time"
 
 	"golang.org/x/net/proxy"
-	"goproxy/config"
-	"goproxy/storage"
+	"proxygate/config"
+	"proxygate/storage"
 )
 
 type Server struct {
@@ -30,6 +31,8 @@ type Server struct {
 	mode             string // "random" 或 "lowest-latency"
 	port             string
 	clientCache      sync.Map
+	serverMu         sync.Mutex
+	server           *http.Server
 }
 
 type cachedHTTPClient struct {
@@ -71,7 +74,37 @@ func (s *Server) Start() error {
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       90 * time.Second,
 	}
-	return server.ListenAndServe()
+	s.serverMu.Lock()
+	s.server = server
+	s.serverMu.Unlock()
+	defer func() {
+		s.serverMu.Lock()
+		if s.server == server {
+			s.server = nil
+		}
+		s.serverMu.Unlock()
+	}()
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
+}
+
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.serverMu.Lock()
+	server := s.server
+	s.serverMu.Unlock()
+	if server == nil {
+		return nil
+	}
+	err := server.Shutdown(ctx)
+	s.clientCache.Range(func(_, value any) bool {
+		if entry, ok := value.(*cachedHTTPClient); ok {
+			entry.transport.CloseIdleConnections()
+		}
+		return true
+	})
+	return err
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -86,7 +119,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			var ok bool
 			opts, ok = s.parseAuth(r)
 			if !ok {
-				w.Header().Set("Proxy-Authenticate", `Basic realm="GoProxy"`)
+				w.Header().Set("Proxy-Authenticate", `Basic realm="ProxyGate"`)
 				http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
 				return
 			}
@@ -94,7 +127,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// Local loopback clients can skip auth so browsers can use SOCKS/HTTP
 			// without embedding credentials. Remote clients still require auth.
 		default:
-			w.Header().Set("Proxy-Authenticate", `Basic realm="GoProxy"`)
+			w.Header().Set("Proxy-Authenticate", `Basic realm="ProxyGate"`)
 			http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
 			return
 		}
@@ -359,11 +392,7 @@ func (s *Server) dialViaProxy(p *storage.Proxy, host string) (net.Conn, error) {
 	case "http":
 		return dialHTTPConnect(p.Address, host, timeout)
 	case "socks5":
-		dialer, err := proxy.SOCKS5("tcp", p.Address, nil, proxy.Direct)
-		if err != nil {
-			return nil, err
-		}
-		return dialer.Dial("tcp", host)
+		return dialSOCKS5Connect(p.Address, host, timeout)
 	default:
 		return nil, fmt.Errorf("unsupported protocol: %s", p.Protocol)
 	}

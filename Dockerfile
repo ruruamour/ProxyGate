@@ -66,7 +66,7 @@ RUN set -eux; \
     exit 1
 
 COPY . .
-RUN CGO_ENABLED=1 GOOS=linux go build -o proxy-pool .
+RUN CGO_ENABLED=1 GOOS=linux go build -o proxygate .
 
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
@@ -99,9 +99,9 @@ FROM base AS runtime
 ENV TZ=Asia/Shanghai
 
 WORKDIR /app
-COPY --from=builder /app/proxy-pool .
+COPY --from=builder /app/proxygate .
 COPY --from=builder /app/sing-box /usr/local/bin/sing-box
 
 EXPOSE 7776 7777 7778 7779 7780
 
-CMD ["./proxy-pool"]
+CMD ["./proxygate"]

@@ -5,15 +5,14 @@
 Thumbs.db
 
 # Go build artifacts
-goproxy
-proxygo
-proxy-pool
+proxygate
 *.exe
 *.out
 *.test
 vendor/
 
 CUSTOM_PROXY_DESIGN.md
+CLAUDE.md
 
 # Test binaries
 test/test_proxy

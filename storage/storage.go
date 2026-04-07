@@ -11,6 +11,8 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+
+	"proxygate/config"
 )
 
 type Proxy struct {
@@ -64,6 +66,8 @@ type SourceStatus struct {
 type Storage struct {
 	db                *sql.DB
 	selectionSnapshot atomic.Pointer[proxySelectionSnapshot]
+	snapshotTakenAt   atomic.Int64
+	snapshotDirty     atomic.Bool
 	snapshotMu        sync.Mutex
 	pendingUseMu      sync.Mutex
 	pendingSuccessUse map[string]int
@@ -84,7 +88,10 @@ type proxySelectionSnapshot struct {
 	byAddress    map[string]Proxy
 }
 
-const successUseFlushInterval = 250 * time.Millisecond
+const (
+	successUseFlushInterval = 250 * time.Millisecond
+	selectionSnapshotMinTTL = 2 * time.Second
+)
 
 func sqliteDSN(path string) string {
 	if strings.Contains(path, "?") {
@@ -328,33 +335,6 @@ func (s *Storage) AddProxies(proxies []Proxy) error {
 	return nil
 }
 
-// GetRandom 随机取一个可用代理（优先选择质量高的）
-func (s *Storage) GetRandom() (*Proxy, error) {
-	rows, err := s.db.Query(
-		`SELECT ` + proxyColumns + `
-		 FROM proxies
-		 WHERE status = 'active' AND fail_count < 3
-		 ORDER BY
-		   CASE quality_grade
-		     WHEN 'S' THEN 1
-		     WHEN 'A' THEN 2
-		     WHEN 'B' THEN 3
-		     ELSE 4
-		   END,
-		   RANDOM()
-		 LIMIT 1`,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	if rows.Next() {
-		return scanProxy(rows)
-	}
-	return nil, fmt.Errorf("no available proxy")
-}
-
 // proxyColumns 代理表查询的标准列列表
 const proxyColumns = `id, address, protocol, exit_ip, exit_location, latency, quality_grade,
 	use_count, success_count, fail_count, last_used, last_check, created_at, status, source, subscription_id`
@@ -388,7 +368,33 @@ func scanProxy(rows *sql.Rows) (*Proxy, error) {
 }
 
 func (s *Storage) invalidateSelectionSnapshot() {
+	s.snapshotDirty.Store(false)
+	s.snapshotTakenAt.Store(0)
 	s.selectionSnapshot.Store(nil)
+}
+
+func (s *Storage) softInvalidateSnapshot() {
+	snap := s.selectionSnapshot.Load()
+	if snap == nil {
+		return
+	}
+	taken := s.snapshotTakenAt.Load()
+	if taken == 0 || time.Since(time.Unix(0, taken)) > selectionSnapshotMinTTL {
+		s.invalidateSelectionSnapshot()
+		return
+	}
+	s.snapshotDirty.Store(true)
+}
+
+func (s *Storage) snapshotExpiredAfterMinTTL() bool {
+	if !s.snapshotDirty.Load() {
+		return false
+	}
+	taken := s.snapshotTakenAt.Load()
+	if taken == 0 {
+		return true
+	}
+	return time.Since(time.Unix(0, taken)) > selectionSnapshotMinTTL
 }
 
 func (s *Storage) startUsageFlusher() {
@@ -470,14 +476,14 @@ func (s *Storage) restorePendingSuccessUse(batch map[string]int) {
 }
 
 func (s *Storage) getSelectionSnapshot() (*proxySelectionSnapshot, error) {
-	if snap := s.selectionSnapshot.Load(); snap != nil {
+	if snap := s.selectionSnapshot.Load(); snap != nil && !s.snapshotExpiredAfterMinTTL() {
 		return snap, nil
 	}
 
 	s.snapshotMu.Lock()
 	defer s.snapshotMu.Unlock()
 
-	if snap := s.selectionSnapshot.Load(); snap != nil {
+	if snap := s.selectionSnapshot.Load(); snap != nil && !s.snapshotExpiredAfterMinTTL() {
 		return snap, nil
 	}
 
@@ -505,6 +511,8 @@ func (s *Storage) getSelectionSnapshot() (*proxySelectionSnapshot, error) {
 	}
 
 	snap := buildSelectionSnapshot(proxies)
+	s.snapshotDirty.Store(false)
+	s.snapshotTakenAt.Store(time.Now().UnixNano())
 	s.selectionSnapshot.Store(snap)
 	return snap, nil
 }
@@ -715,127 +723,6 @@ func (s *Storage) SelectProxy(
 	return nil, fmt.Errorf("no available proxy")
 }
 
-// GetRandomExclude 排除指定地址随机取一个
-func (s *Storage) GetRandomExclude(excludes []string) (*Proxy, error) {
-	return s.GetRandomExcludeFiltered(excludes, "")
-}
-
-// GetRandomExcludeFiltered 排除指定地址随机取一个（可按来源过滤）
-func (s *Storage) GetRandomExcludeFiltered(excludes []string, sourceFilter string) (*Proxy, error) {
-	proxies, err := s.GetAllFiltered(sourceFilter)
-	if err != nil {
-		return nil, err
-	}
-
-	excludeMap := make(map[string]bool)
-	for _, e := range excludes {
-		excludeMap[e] = true
-	}
-
-	var available []Proxy
-	for _, p := range proxies {
-		if !excludeMap[p.Address] {
-			available = append(available, p)
-		}
-	}
-
-	if len(available) == 0 {
-		if sourceFilter != "" {
-			return nil, fmt.Errorf("no available %s proxy", sourceFilter)
-		}
-		return s.GetRandom()
-	}
-
-	p := available[rand.Intn(len(available))]
-	return &p, nil
-}
-
-// GetLowestLatencyExclude 排除指定地址后获取延迟最低的代理
-func (s *Storage) GetLowestLatencyExclude(excludes []string) (*Proxy, error) {
-	return s.GetLowestLatencyExcludeFiltered(excludes, "")
-}
-
-// GetLowestLatencyExcludeFiltered 排除指定地址后获取延迟最低的代理（可按来源过滤）
-func (s *Storage) GetLowestLatencyExcludeFiltered(excludes []string, sourceFilter string) (*Proxy, error) {
-	proxies, err := s.GetAllFiltered(sourceFilter)
-	if err != nil {
-		return nil, err
-	}
-
-	excludeMap := make(map[string]bool)
-	for _, e := range excludes {
-		excludeMap[e] = true
-	}
-
-	for _, p := range proxies {
-		if !excludeMap[p.Address] {
-			proxy := p
-			return &proxy, nil
-		}
-	}
-
-	return nil, fmt.Errorf("no available proxy")
-}
-
-// GetRandomByProtocolExclude 按协议获取随机代理（排除已尝试的）
-func (s *Storage) GetRandomByProtocolExclude(protocol string, excludes []string) (*Proxy, error) {
-	return s.GetRandomByProtocolExcludeFiltered(protocol, excludes, "")
-}
-
-// GetRandomByProtocolExcludeFiltered 按协议获取随机代理（可按来源过滤）
-func (s *Storage) GetRandomByProtocolExcludeFiltered(protocol string, excludes []string, sourceFilter string) (*Proxy, error) {
-	proxies, err := s.GetAllFiltered(sourceFilter)
-	if err != nil {
-		return nil, err
-	}
-
-	excludeMap := make(map[string]bool)
-	for _, e := range excludes {
-		excludeMap[e] = true
-	}
-
-	var available []Proxy
-	for _, p := range proxies {
-		if p.Protocol == protocol && !excludeMap[p.Address] {
-			available = append(available, p)
-		}
-	}
-
-	if len(available) == 0 {
-		return nil, fmt.Errorf("no %s proxy available", protocol)
-	}
-
-	proxy := available[time.Now().UnixNano()%int64(len(available))]
-	return &proxy, nil
-}
-
-// GetLowestLatencyByProtocolExclude 按协议获取最低延迟代理（排除已尝试的）
-func (s *Storage) GetLowestLatencyByProtocolExclude(protocol string, excludes []string) (*Proxy, error) {
-	return s.GetLowestLatencyByProtocolExcludeFiltered(protocol, excludes, "")
-}
-
-// GetLowestLatencyByProtocolExcludeFiltered 按协议获取最低延迟代理（可按来源过滤）
-func (s *Storage) GetLowestLatencyByProtocolExcludeFiltered(protocol string, excludes []string, sourceFilter string) (*Proxy, error) {
-	proxies, err := s.GetAllFiltered(sourceFilter)
-	if err != nil {
-		return nil, err
-	}
-
-	excludeMap := make(map[string]bool)
-	for _, e := range excludes {
-		excludeMap[e] = true
-	}
-
-	for _, p := range proxies {
-		if p.Protocol == protocol && !excludeMap[p.Address] {
-			proxy := p
-			return &proxy, nil
-		}
-	}
-
-	return nil, fmt.Errorf("no %s proxy available", protocol)
-}
-
 // Delete 立即删除指定代理
 func (s *Storage) Delete(address string) error {
 	result, err := s.db.Exec(`DELETE FROM proxies WHERE address = ?`, address)
@@ -879,7 +766,7 @@ func (s *Storage) UpdateLatency(address string, latencyMs int) error {
 		latencyMs, address,
 	)
 	if err == nil {
-		s.invalidateSelectionSnapshot()
+		s.softInvalidateSnapshot()
 	}
 	return err
 }
@@ -894,7 +781,7 @@ func (s *Storage) UpdateExitInfo(address, exitIP, exitLocation string, latencyMs
 		exitIP, exitLocation, latencyMs, grade, address,
 	)
 	if err == nil {
-		s.invalidateSelectionSnapshot()
+		s.softInvalidateSnapshot()
 	}
 	return err
 }
@@ -992,7 +879,7 @@ func (s *Storage) MarkAsReplacementCandidate(addresses []string) error {
 		args[i] = addr
 	}
 	query := fmt.Sprintf(`UPDATE proxies SET status = 'candidate_replace' WHERE address IN (%s)`,
-		fmt.Sprintf("%s", placeholders))
+		strings.Join(placeholders, ","))
 	_, err := s.db.Exec(query, args...)
 	if err == nil {
 		s.invalidateSelectionSnapshot()
@@ -1078,17 +965,49 @@ func (s *Storage) GetBatchForHealthCheck(batchSize int, skipSGrade bool, sourceF
 	return proxies, nil
 }
 
-// CalculateQualityGrade 根据延迟计算质量等级
+// CalculateQualityGrade 根据当前配置阈值计算质量等级。
+// S/A 是健康阈值内的细分，B 代表仍在标准可用范围内，C 代表超过标准阈值。
 func CalculateQualityGrade(latencyMs int) string {
+	return CalculateQualityGradeForConfig(latencyMs, config.Get())
+}
+
+// CalculateQualityGradeForConfig 根据指定配置阈值计算质量等级。
+func CalculateQualityGradeForConfig(latencyMs int, cfg *config.Config) string {
+	healthyThreshold := 2000
+	maxThreshold := 2500
+	if cfg != nil {
+		if cfg.MaxLatencyHealthy > 0 {
+			healthyThreshold = cfg.MaxLatencyHealthy
+		}
+		if cfg.MaxLatencyMs > 0 {
+			maxThreshold = cfg.MaxLatencyMs
+		}
+	}
+	if healthyThreshold < 1 {
+		healthyThreshold = 1
+	}
+	if maxThreshold < healthyThreshold {
+		maxThreshold = healthyThreshold
+	}
+
+	sThreshold := healthyThreshold / 4
+	if sThreshold < 1 {
+		sThreshold = 1
+	}
+	aThreshold := healthyThreshold / 2
+	if aThreshold < sThreshold {
+		aThreshold = sThreshold
+	}
+
 	switch {
-	case latencyMs <= 500:
+	case latencyMs <= sThreshold:
 		return "S" // 超快
-	case latencyMs <= 1000:
+	case latencyMs <= aThreshold:
 		return "A" // 良好
-	case latencyMs <= 2000:
+	case latencyMs <= maxThreshold:
 		return "B" // 可用
 	default:
-		return "C" // 淘汰候选
+		return "C" // 慢速
 	}
 }
 

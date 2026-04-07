@@ -3,8 +3,8 @@ package proxy
 import (
 	"testing"
 
-	"goproxy/config"
-	"goproxy/storage"
+	"proxygate/config"
+	"proxygate/storage"
 )
 
 func TestBuildClientCacheEviction(t *testing.T) {

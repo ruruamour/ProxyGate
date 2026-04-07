@@ -7,8 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"goproxy/config"
-	"goproxy/storage"
+	"proxygate/config"
+	"proxygate/storage"
 )
 
 type remoteAddrConn struct {

@@ -1,12 +1,12 @@
 [Unit]
-Description=GoProxy Local
+Description=ProxyGate Local
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/projects/GoProxy
-ExecStart=%h/projects/GoProxy/proxygo
+WorkingDirectory=%h/projects/ProxyGate
+ExecStart=%h/projects/ProxyGate/proxygate
 Restart=always
 RestartSec=5
 TimeoutStopSec=30

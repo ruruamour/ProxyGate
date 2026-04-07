@@ -1,13 +1,10 @@
 #!/bin/bash
 ###
- # @LastEditTime: 2026-03-29 23:26:29
- # @Description: ...
- # @Date: 2026-03-29 23:14:32
- # @Author: isboyjc
- # @LastEditors: isboyjc
+ # @LastEditTime: 2026-04-07 02:00:00
+ # @Description: ProxyGate SOCKS5 代理测试脚本
 ### 
 
-# GoProxy SOCKS5 代理测试脚本
+# ProxyGate SOCKS5 代理测试脚本
 # 用法: ./test_socks5.sh [端口号，默认7779]
 
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"

@@ -11,17 +11,17 @@ import (
 	"syscall"
 	"time"
 
-	"goproxy/checker"
-	"goproxy/config"
-	"goproxy/custom"
-	"goproxy/fetcher"
-	"goproxy/logger"
-	"goproxy/optimizer"
-	"goproxy/pool"
-	"goproxy/proxy"
-	"goproxy/storage"
-	"goproxy/validator"
-	"goproxy/webui"
+	"proxygate/checker"
+	"proxygate/config"
+	"proxygate/custom"
+	"proxygate/fetcher"
+	"proxygate/logger"
+	"proxygate/optimizer"
+	"proxygate/pool"
+	"proxygate/proxy"
+	"proxygate/storage"
+	"proxygate/validator"
+	"proxygate/webui"
 )
 
 var fetchRunning atomic.Bool
@@ -67,7 +67,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("init storage: %v", err)
 	}
-	defer store.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	// 初始化限流器
 	fetcher.InitIPQueryLimiter(cfg.IPQueryRateLimit)
@@ -92,16 +93,6 @@ func main() {
 	// 初始化订阅管理器
 	customMgr := custom.NewManager(store, validate, cfg)
 
-	// 优雅退出时顺手停止 sing-box 子进程，避免本地开发重启后残留僵尸/占口。
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		sig := <-sigCh
-		log.Printf("[main] 收到退出信号 %s，正在停止后台组件...", sig)
-		customMgr.Stop()
-		os.Exit(0)
-	}()
-
 	// 配置变更通知 channel
 	configChanged := make(chan struct{}, 1)
 
@@ -109,7 +100,6 @@ func main() {
 	ui := webui.New(store, cfg, poolMgr, customMgr, func() {
 		go smartFetchAndFill(fetch, validate, store, poolMgr)
 	}, configChanged)
-	ui.Start()
 
 	// 首次智能填充（清理后立即触发）
 	go func() {
@@ -118,45 +108,82 @@ func main() {
 	}()
 
 	// 启动状态监控协程
-	go startStatusMonitor(poolMgr, fetch, validate, store)
+	go startStatusMonitor(ctx, poolMgr, fetch, validate, store)
 
 	// 启动健康检查器
-	healthChecker.StartBackground()
+	healthChecker.StartBackground(ctx)
 
 	// 启动优化轮换器
-	opt.StartBackground()
+	opt.StartBackground(ctx)
 
 	// 启动订阅管理器
 	go customMgr.Start()
 
 	// 监听配置变更
-	go watchConfigChanges(configChanged, poolMgr)
+	go watchConfigChanges(ctx, configChanged, poolMgr)
 
-	// 启动 HTTP 稳定代理服务（最低延迟模式）
-	go func() {
-		if err := stableServer.Start(); err != nil {
-			log.Fatalf("stable http proxy server: %v", err)
-		}
-	}()
-
-	// 启动 SOCKS5 稳定代理服务（最低延迟模式）
-	go func() {
-		if err := socks5StableServer.Start(); err != nil {
-			log.Fatalf("stable socks5 proxy server: %v", err)
-		}
-	}()
-
-	// 启动 SOCKS5 随机代理服务
-	go func() {
-		if err := socks5RandomServer.Start(); err != nil {
-			log.Fatalf("random socks5 proxy server: %v", err)
-		}
-	}()
-
-	// 启动 HTTP 随机代理服务（阻塞）
-	if err := randomServer.Start(); err != nil {
-		log.Fatalf("random http proxy server: %v", err)
+	type serverResult struct {
+		name string
+		err  error
 	}
+	errCh := make(chan serverResult, 5)
+	runServer := func(name string, start func() error) {
+		go func() {
+			if err := start(); err != nil {
+				errCh <- serverResult{name: name, err: err}
+			}
+		}()
+	}
+
+	runServer("webui", ui.Start)
+	runServer("stable http proxy server", stableServer.Start)
+	runServer("stable socks5 proxy server", socks5StableServer.Start)
+	runServer("random socks5 proxy server", socks5RandomServer.Start)
+	runServer("random http proxy server", randomServer.Start)
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
+	var runErr error
+	select {
+	case sig := <-sigCh:
+		log.Printf("[main] 收到退出信号 %s，正在优雅关闭...", sig)
+	case result := <-errCh:
+		runErr = result.err
+		log.Printf("[main] %s 意外退出: %v", result.name, result.err)
+	}
+
+	cancel()
+	customMgr.Stop()
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+
+	for _, shutdown := range []struct {
+		name string
+		fn   func(context.Context) error
+	}{
+		{name: "webui", fn: ui.Shutdown},
+		{name: "stable http proxy server", fn: stableServer.Shutdown},
+		{name: "random http proxy server", fn: randomServer.Shutdown},
+		{name: "stable socks5 proxy server", fn: socks5StableServer.Shutdown},
+		{name: "random socks5 proxy server", fn: socks5RandomServer.Shutdown},
+	} {
+		if err := shutdown.fn(shutdownCtx); err != nil {
+			log.Printf("[main] 关闭 %s 失败: %v", shutdown.name, err)
+		}
+	}
+
+	if err := store.Close(); err != nil {
+		log.Printf("[main] 关闭存储失败: %v", err)
+	}
+
+	if runErr != nil {
+		log.Printf("[main] 因服务错误退出: %v", runErr)
+		return
+	}
+	log.Println("[main] 已完成优雅关机")
 }
 
 func cappedHTTPProbeConcurrency(total int) int {
@@ -433,29 +460,33 @@ func smartFetchAndFill(fetch *fetcher.Fetcher, validate *validator.Validator, st
 }
 
 // startStatusMonitor 状态监控协程
-func startStatusMonitor(poolMgr *pool.Manager, fetch *fetcher.Fetcher, validate *validator.Validator, store *storage.Storage) {
+func startStatusMonitor(ctx context.Context, poolMgr *pool.Manager, fetch *fetcher.Fetcher, validate *validator.Validator, store *storage.Storage) {
 	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
 	log.Println("[monitor] 📡 状态监控器已启动（每30秒检查）")
 
-	for range ticker.C {
-		status, err := poolMgr.GetStatus()
-		if err != nil {
-			continue
-		}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			status, err := poolMgr.GetStatus()
+			if err != nil {
+				continue
+			}
 
-		// 每分钟检查池子状态
-		needFetch, mode, preferredProtocol := poolMgr.NeedsFetch(status)
-		if needFetch {
-			log.Printf("[monitor] ⚠️  检测到池子需求: 状态=%s 模式=%s 协议=%s",
-				status.State, mode, preferredProtocol)
-			// 触发智能填充
-			go smartFetchAndFill(fetch, validate, store, poolMgr)
+			needFetch, mode, preferredProtocol := poolMgr.NeedsFetch(status)
+			if needFetch {
+				log.Printf("[monitor] ⚠️  检测到池子需求: 状态=%s 模式=%s 协议=%s",
+					status.State, mode, preferredProtocol)
+				go smartFetchAndFill(fetch, validate, store, poolMgr)
+			}
 		}
 	}
 }
 
 // watchConfigChanges 监听配置变更
-func watchConfigChanges(configChanged <-chan struct{}, poolMgr *pool.Manager) {
+func watchConfigChanges(ctx context.Context, configChanged <-chan struct{}, poolMgr *pool.Manager) {
 	var oldSize int
 	var oldRatio float64
 
@@ -463,14 +494,19 @@ func watchConfigChanges(configChanged <-chan struct{}, poolMgr *pool.Manager) {
 	oldSize = cfg.PoolMaxSize
 	oldRatio = cfg.PoolHTTPRatio
 
-	for range configChanged {
-		newCfg := config.Get()
-		if newCfg.PoolMaxSize != oldSize || newCfg.PoolHTTPRatio != oldRatio {
-			log.Printf("[config] 🔧 配置变更检测: 容量 %d→%d 比例 %.2f→%.2f",
-				oldSize, newCfg.PoolMaxSize, oldRatio, newCfg.PoolHTTPRatio)
-			poolMgr.AdjustForConfigChange(oldSize, oldRatio)
-			oldSize = newCfg.PoolMaxSize
-			oldRatio = newCfg.PoolHTTPRatio
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-configChanged:
+			newCfg := config.Get()
+			if newCfg.PoolMaxSize != oldSize || newCfg.PoolHTTPRatio != oldRatio {
+				log.Printf("[config] 🔧 配置变更检测: 容量 %d→%d 比例 %.2f→%.2f",
+					oldSize, newCfg.PoolMaxSize, oldRatio, newCfg.PoolHTTPRatio)
+				poolMgr.AdjustForConfigChange(oldSize, oldRatio)
+				oldSize = newCfg.PoolMaxSize
+				oldRatio = newCfg.PoolHTTPRatio
+			}
 		}
 	}
 }

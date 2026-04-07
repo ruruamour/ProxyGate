@@ -30,3 +30,32 @@ func TestGetBatchForHealthCheckFiltersBySource(t *testing.T) {
 		t.Fatalf("GetBatchForHealthCheck() source = %q, want %q", proxies[0].Source, "free")
 	}
 }
+
+func TestMarkAsReplacementCandidateMarksRequestedAddresses(t *testing.T) {
+	store, err := New(filepath.Join(t.TempDir(), "proxy.db"))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer store.Close()
+
+	addresses := []string{"1.1.1.1:80", "2.2.2.2:80"}
+	for _, address := range addresses {
+		if err := store.AddProxy(address, "http"); err != nil {
+			t.Fatalf("AddProxy(%s) error = %v", address, err)
+		}
+	}
+
+	if err := store.MarkAsReplacementCandidate(addresses); err != nil {
+		t.Fatalf("MarkAsReplacementCandidate() error = %v", err)
+	}
+
+	for _, address := range addresses {
+		var status string
+		if err := store.db.QueryRow(`SELECT status FROM proxies WHERE address = ?`, address).Scan(&status); err != nil {
+			t.Fatalf("QueryRow(%s) error = %v", address, err)
+		}
+		if status != "candidate_replace" {
+			t.Fatalf("status(%s) = %q, want %q", address, status, "candidate_replace")
+		}
+	}
+}

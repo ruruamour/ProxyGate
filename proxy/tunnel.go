@@ -3,10 +3,18 @@ package proxy
 import (
 	"io"
 	"net"
+	"sync"
 	"time"
 )
 
 const tunnelSuccessGrace = 2 * time.Second
+
+var tunnelBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 128*1024)
+		return &buf
+	},
+}
 
 type tunnelCopyResult struct {
 	direction string
@@ -54,7 +62,9 @@ func relayTunnel(clientConn, upstreamConn net.Conn) tunnelOutcome {
 	results := make(chan tunnelCopyResult, 2)
 
 	copyFn := func(direction string, dst, src net.Conn) {
-		n, _ := io.Copy(dst, src)
+		bufp := tunnelBufPool.Get().(*[]byte)
+		n, _ := io.CopyBuffer(dst, src, *bufp)
+		tunnelBufPool.Put(bufp)
 		closeConnWrite(dst)
 		closeConnRead(src)
 		results <- tunnelCopyResult{direction: direction, bytes: n}

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# GoProxy HTTP 协议代理 HTTPS 访问测试脚本
+# ProxyGate HTTP 协议代理 HTTPS 访问测试脚本
 # 随机访问多个 HTTPS 网站，验证 HTTP 代理的 CONNECT 隧道能力
 # 用法: ./test_http_https.sh [端口号，默认7777] [测试次数，默认持续运行]
 # 按 Ctrl+C 停止测试

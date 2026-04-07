@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"goproxy/config"
+	"proxygate/config"
 )
 
 func TestValidationTargetsDedupesPrimaryAndFallbacks(t *testing.T) {
@@ -26,6 +26,27 @@ func TestValidationTargetsDedupesPrimaryAndFallbacks(t *testing.T) {
 	}
 	if targets[1] != "https://httpbin.org/ip" {
 		t.Fatalf("targets[1] = %q, want fallback target", targets[1])
+	}
+}
+
+func TestSplitValidationTargetsPromotesFirstFallbackWhenPrimaryEmpty(t *testing.T) {
+	cfg := &config.Config{
+		ValidateFallbackURLs: []string{
+			"https://cp.cloudflare.com/generate_204",
+			"https://cp.cloudflare.com/generate_204",
+			"https://httpbin.org/ip",
+		},
+	}
+
+	primary, fallbacks := splitValidationTargets("", cfg)
+	if primary != "https://cp.cloudflare.com/generate_204" {
+		t.Fatalf("primary = %q, want first fallback", primary)
+	}
+	if len(fallbacks) != 1 {
+		t.Fatalf("len(fallbacks) = %d, want 1", len(fallbacks))
+	}
+	if fallbacks[0] != "https://httpbin.org/ip" {
+		t.Fatalf("fallbacks[0] = %q, want remaining fallback", fallbacks[0])
 	}
 }
 

@@ -1,13 +1,14 @@
 package checker
 
 import (
+	"context"
 	"log"
 	"time"
 
-	"goproxy/config"
-	"goproxy/pool"
-	"goproxy/storage"
-	"goproxy/validator"
+	"proxygate/config"
+	"proxygate/pool"
+	"proxygate/storage"
+	"proxygate/validator"
 )
 
 // HealthChecker 健康检查器
@@ -110,7 +111,7 @@ func (hc *HealthChecker) RunOnce() {
 }
 
 // StartBackground 后台定时健康检查
-func (hc *HealthChecker) StartBackground() {
+func (hc *HealthChecker) StartBackground(ctx context.Context) {
 	go func() {
 		for {
 			cfg := hc.currentConfig()
@@ -118,8 +119,14 @@ func (hc *HealthChecker) StartBackground() {
 			if interval <= 0 {
 				interval = 5 * time.Minute
 			}
-			<-time.After(interval)
-			hc.RunOnce()
+			timer := time.NewTimer(interval)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+				hc.RunOnce()
+			}
 		}
 	}()
 	log.Printf("[health] 健康检查器已启动，间隔 %d 分钟", hc.currentConfig().HealthCheckInterval)

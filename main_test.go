@@ -3,8 +3,8 @@ package main
 import (
 	"testing"
 
-	"goproxy/pool"
-	"goproxy/storage"
+	"proxygate/pool"
+	"proxygate/storage"
 )
 
 func TestCandidateBudget(t *testing.T) {

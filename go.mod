@@ -1,4 +1,4 @@
-module goproxy
+module proxygate
 
 go 1.25.0
 

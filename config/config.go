@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"sync"
+	"sync/atomic"
 )
 
-const DefaultPassword = "goproxy"
+const DefaultPassword = "proxygate"
 
 func dataDir() string {
 	if d := os.Getenv("DATA_DIR"); d != "" {
@@ -110,10 +110,7 @@ type Config struct {
 	SOCKS5SourceURL string
 }
 
-var (
-	globalCfg *Config
-	cfgMu     sync.RWMutex
-)
+var globalCfg atomic.Pointer[Config]
 
 func cloneStrings(values []string) []string {
 	if len(values) == 0 {
@@ -419,17 +416,14 @@ func Load() *Config {
 		}
 	}
 	snapshot := cloneConfig(cfg)
-	cfgMu.Lock()
-	globalCfg = snapshot
-	cfgMu.Unlock()
+	globalCfg.Store(snapshot)
 	return cloneConfig(snapshot)
 }
 
-// Get 获取当前配置
+// Get 获取当前配置。
+// 返回值视为只读快照，调用方不得原地修改。
 func Get() *Config {
-	cfgMu.RLock()
-	defer cfgMu.RUnlock()
-	return cloneConfig(globalCfg)
+	return globalCfg.Load()
 }
 
 // savedConfig 持久化可调整的字段
@@ -479,10 +473,7 @@ type savedConfig struct {
 // Save 保存配置到文件，并更新内存配置
 func Save(cfg *Config) error {
 	snapshot := cloneConfig(cfg)
-
-	cfgMu.Lock()
-	globalCfg = snapshot
-	cfgMu.Unlock()
+	globalCfg.Store(snapshot)
 
 	customPriority := snapshot.CustomPriority
 	customFreePriority := snapshot.CustomFreePriority

@@ -1,15 +1,20 @@
 package proxy
 
 import (
+	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"sync"
 	"time"
 
-	"goproxy/config"
-	"goproxy/storage"
+	"proxygate/config"
+	"proxygate/storage"
 )
 
 // SOCKS5Server SOCKS5 协议服务器
@@ -20,6 +25,8 @@ type SOCKS5Server struct {
 	sessionNamespace string
 	mode             string // "random" 或 "lowest-latency"
 	port             string
+	listenerMu       sync.Mutex
+	listener         net.Listener
 }
 
 // NewSOCKS5 创建 SOCKS5 服务器
@@ -57,15 +64,39 @@ func (s *SOCKS5Server) Start() error {
 	if err != nil {
 		return err
 	}
+	s.listenerMu.Lock()
+	s.listener = listener
+	s.listenerMu.Unlock()
 	defer listener.Close()
+	defer func() {
+		s.listenerMu.Lock()
+		if s.listener == listener {
+			s.listener = nil
+		}
+		s.listenerMu.Unlock()
+	}()
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return nil
+			}
 			continue
 		}
 		go s.handleConnection(conn)
 	}
+}
+
+func (s *SOCKS5Server) Shutdown(_ context.Context) error {
+	s.listenerMu.Lock()
+	listener := s.listener
+	s.listener = nil
+	s.listenerMu.Unlock()
+	if listener == nil {
+		return nil
+	}
+	return listener.Close()
 }
 
 // handleConnection 处理 SOCKS5 连接
@@ -293,7 +324,9 @@ func (s *SOCKS5Server) socks5Auth(conn net.Conn) (RequestOptions, error) {
 	// 验证用户名和密码
 	cfg := s.currentConfig()
 	opts, err := parseUsernameOptions(cfg.ProxyAuthUsername, username, s.sessionNamespace)
-	if err != nil || password != cfg.ProxyAuthPassword {
+	passwordHash := fmt.Sprintf("%x", sha256.Sum256([]byte(password)))
+	passwordMatch := subtle.ConstantTimeCompare([]byte(passwordHash), []byte(cfg.ProxyAuthPasswordHash)) == 1
+	if err != nil || !passwordMatch {
 		// 认证失败: [VER(1), STATUS(1)]
 		conn.Write([]byte{0x01, 0x01})
 		return RequestOptions{}, fmt.Errorf("authentication failed")
@@ -399,83 +432,7 @@ func (s *SOCKS5Server) dialViaProxy(p *storage.Proxy, target string) (net.Conn, 
 		return dialHTTPConnect(p.Address, target, timeout)
 
 	case "socks5":
-		// 使用 SOCKS5 代理
-		dialer := &net.Dialer{Timeout: timeout}
-		proxyConn, err := dialer.Dial("tcp", p.Address)
-		if err != nil {
-			return nil, err
-		}
-		if err := proxyConn.SetDeadline(time.Now().Add(timeout)); err != nil {
-			proxyConn.Close()
-			return nil, err
-		}
-
-		// SOCKS5 握手（无认证）
-		if _, err := proxyConn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
-			proxyConn.Close()
-			return nil, err
-		}
-
-		handshake := make([]byte, 2)
-		if _, err := io.ReadFull(proxyConn, handshake); err != nil {
-			proxyConn.Close()
-			return nil, err
-		}
-
-		if handshake[0] != 0x05 || handshake[1] != 0x00 {
-			proxyConn.Close()
-			return nil, fmt.Errorf("socks5 handshake failed")
-		}
-
-		// 发送 CONNECT 请求
-		host, port, err := net.SplitHostPort(target)
-		if err != nil {
-			proxyConn.Close()
-			return nil, err
-		}
-
-		// 构建请求
-		req := []byte{0x05, 0x01, 0x00} // VER, CMD=CONNECT, RSV
-
-		// 判断是 IP 还是域名
-		if ip := net.ParseIP(host); ip != nil {
-			if ip4 := ip.To4(); ip4 != nil {
-				req = append(req, 0x01) // IPv4
-				req = append(req, ip4...)
-			} else {
-				req = append(req, 0x04) // IPv6
-				req = append(req, ip...)
-			}
-		} else {
-			req = append(req, 0x03) // Domain
-			req = append(req, byte(len(host)))
-			req = append(req, []byte(host)...)
-		}
-
-		// 添加端口
-		portNum := uint16(0)
-		fmt.Sscanf(port, "%d", &portNum)
-		portBytes := make([]byte, 2)
-		binary.BigEndian.PutUint16(portBytes, portNum)
-		req = append(req, portBytes...)
-
-		if _, err := proxyConn.Write(req); err != nil {
-			proxyConn.Close()
-			return nil, err
-		}
-
-		// 读取响应。BND.ADDR 是可变长字段，必须完整消费，否则后续业务流量会被污染。
-		if err := readSOCKS5ConnectReply(proxyConn); err != nil {
-			proxyConn.Close()
-			return nil, err
-		}
-
-		if err := proxyConn.SetDeadline(time.Time{}); err != nil {
-			proxyConn.Close()
-			return nil, err
-		}
-
-		return proxyConn, nil
+		return dialSOCKS5Connect(p.Address, target, timeout)
 
 	default:
 		return nil, fmt.Errorf("unsupported protocol: %s", p.Protocol)

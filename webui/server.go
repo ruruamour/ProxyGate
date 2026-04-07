@@ -1,13 +1,16 @@
 package webui
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,19 +19,35 @@ import (
 	"sync"
 	"time"
 
-	"goproxy/config"
-	"goproxy/custom"
-	"goproxy/logger"
-	"goproxy/pool"
-	"goproxy/storage"
-	"goproxy/validator"
+	"proxygate/config"
+	"proxygate/custom"
+	"proxygate/logger"
+	"proxygate/pool"
+	"proxygate/storage"
+	"proxygate/validator"
 )
 
 // 简单内存 session
 var (
 	sessions   = make(map[string]time.Time)
 	sessionsMu sync.RWMutex
+
+	contributionWindows   = make(map[string]contributionRateWindow)
+	contributionWindowsMu sync.Mutex
 )
+
+const (
+	contributionMaxBodyBytes = 1 << 20
+	contributionMaxFileBytes = 768 << 10
+	contributionMaxURLBytes  = 4096
+	contributionRateLimit    = 3
+	contributionRatePeriod   = 10 * time.Minute
+)
+
+type contributionRateWindow struct {
+	Count   int
+	ResetAt time.Time
+}
 
 func cleanupExpiredSessionsLocked(now time.Time) {
 	for token, expiry := range sessions {
@@ -125,6 +144,80 @@ func sameOriginRequest(r *http.Request) bool {
 	return false
 }
 
+func requestClientIP(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err == nil && host != "" {
+		return host
+	}
+	return strings.TrimSpace(remoteAddr)
+}
+
+func allowContribution(remoteAddr string, now time.Time) (time.Duration, bool) {
+	clientIP := requestClientIP(remoteAddr)
+	if clientIP == "" {
+		clientIP = "unknown"
+	}
+
+	contributionWindowsMu.Lock()
+	defer contributionWindowsMu.Unlock()
+
+	for key, state := range contributionWindows {
+		if !state.ResetAt.IsZero() && now.After(state.ResetAt) {
+			delete(contributionWindows, key)
+		}
+	}
+
+	state := contributionWindows[clientIP]
+	if state.ResetAt.IsZero() || now.After(state.ResetAt) {
+		state = contributionRateWindow{ResetAt: now.Add(contributionRatePeriod)}
+	}
+	if state.Count >= contributionRateLimit {
+		retryAfter := time.Until(state.ResetAt)
+		if retryAfter < 0 {
+			retryAfter = 0
+		}
+		return retryAfter, false
+	}
+
+	state.Count++
+	contributionWindows[clientIP] = state
+	return 0, true
+}
+
+func validateContributionURL(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fmt.Errorf("订阅 URL 不能为空")
+	}
+	if len(raw) > contributionMaxURLBytes {
+		return fmt.Errorf("订阅 URL 过长")
+	}
+
+	u, err := url.ParseRequestURI(raw)
+	if err != nil {
+		return fmt.Errorf("订阅 URL 无效")
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https":
+	default:
+		return fmt.Errorf("仅支持 http/https 订阅 URL")
+	}
+
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return fmt.Errorf("订阅 URL 缺少主机名")
+	}
+	if host == "localhost" || strings.HasSuffix(host, ".local") {
+		return fmt.Errorf("不允许本地地址")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+			return fmt.Errorf("不允许内网或本地地址")
+		}
+	}
+	return nil
+}
+
 type FetchTrigger func()
 
 type Server struct {
@@ -134,6 +227,8 @@ type Server struct {
 	customMgr     *custom.Manager
 	fetchTrigger  FetchTrigger
 	configChanged chan<- struct{}
+	serverMu      sync.Mutex
+	server        *http.Server
 }
 
 func New(s *storage.Storage, cfg *config.Config, pm *pool.Manager, cm *custom.Manager, ft FetchTrigger, cc chan<- struct{}) *Server {
@@ -147,7 +242,14 @@ func New(s *storage.Storage, cfg *config.Config, pm *pool.Manager, cm *custom.Ma
 	}
 }
 
-func (s *Server) Start() {
+func (s *Server) currentConfig() *config.Config {
+	if cfg := config.Get(); cfg != nil {
+		return cfg
+	}
+	return s.cfg
+}
+
+func (s *Server) Start() error {
 	mux := http.NewServeMux()
 
 	// 添加日志中间件
@@ -187,12 +289,36 @@ func (s *Server) Start() {
 	mux.HandleFunc("/api/subscription/refresh-all", s.authMiddleware(s.apiSubscriptionRefreshAll))
 	mux.HandleFunc("/api/subscription/toggle", s.authMiddleware(s.apiSubscriptionToggle))
 
-	log.Printf("WebUI listening on %s", s.cfg.WebUIPort)
-	go func() {
-		if err := http.ListenAndServe(s.cfg.WebUIPort, loggedMux); err != nil {
-			log.Fatalf("webui: %v", err)
+	server := &http.Server{
+		Addr:    s.cfg.WebUIPort,
+		Handler: loggedMux,
+	}
+	s.serverMu.Lock()
+	s.server = server
+	s.serverMu.Unlock()
+	defer func() {
+		s.serverMu.Lock()
+		if s.server == server {
+			s.server = nil
 		}
+		s.serverMu.Unlock()
 	}()
+
+	log.Printf("WebUI listening on %s", s.cfg.WebUIPort)
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
+}
+
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.serverMu.Lock()
+	server := s.server
+	s.serverMu.Unlock()
+	if server == nil {
+		return nil
+	}
+	return server.Shutdown(ctx)
 }
 
 // authMiddleware 管理员权限中间件（必须登录）
@@ -373,7 +499,7 @@ func (s *Server) apiRefreshProxy(w http.ResponseWriter, r *http.Request) {
 
 	// 异步验证并更新
 	go func() {
-		cfg := config.Get()
+		cfg := s.currentConfig()
 		v := validator.New(1, cfg.ValidateTimeout, cfg.ValidateURL)
 
 		log.Printf("[webui] refreshing proxy: %s", req.Address)
@@ -423,7 +549,7 @@ func (s *Server) apiRefreshLatency(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		cfg := config.Get()
+		cfg := s.currentConfig()
 		validate := validator.New(cfg.ValidateConcurrency, cfg.ValidateTimeout, cfg.ValidateURL)
 
 		log.Printf("[webui] refreshing latency for %d proxies...", len(proxies))
@@ -457,7 +583,7 @@ func (s *Server) apiLogs(w http.ResponseWriter, r *http.Request) {
 
 // apiConfig 获取配置
 func (s *Server) apiConfig(w http.ResponseWriter, r *http.Request) {
-	cfg := config.Get()
+	cfg := s.currentConfig()
 	httpSlots, socks5Slots := cfg.CalculateSlots()
 
 	jsonOK(w, map[string]interface{}{
@@ -539,7 +665,7 @@ func (s *Server) apiConfigSave(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 更新配置
-	oldCfg := config.Get()
+	oldCfg := s.currentConfig()
 	newCfg := *oldCfg
 	newCfg.PoolMaxSize = req.PoolMaxSize
 	newCfg.PoolHTTPRatio = req.PoolHTTPRatio
@@ -665,21 +791,52 @@ func (s *Server) apiSubscriptionContribute(w http.ResponseWriter, r *http.Reques
 		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !sameOriginRequest(r) {
+		jsonError(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if retryAfter, ok := allowContribution(r.RemoteAddr, time.Now()); !ok {
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", int(retryAfter.Seconds())+1))
+		jsonError(w, "提交过于频繁，请稍后再试", http.StatusTooManyRequests)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, contributionMaxBodyBytes)
 	var req struct {
 		Name        string `json:"name"`
 		URL         string `json:"url"`
 		FileContent string `json:"file_content"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if strings.Contains(err.Error(), "http: request body too large") {
+			jsonError(w, "请求体过大", http.StatusRequestEntityTooLarge)
+			return
+		}
 		jsonError(w, "invalid request", http.StatusBadRequest)
 		return
 	}
+	req.Name = strings.TrimSpace(req.Name)
+	req.URL = strings.TrimSpace(req.URL)
 	if req.URL == "" && req.FileContent == "" {
 		jsonError(w, "请填写订阅 URL 或上传配置文件", http.StatusBadRequest)
 		return
 	}
+	if req.URL != "" && req.FileContent != "" {
+		jsonError(w, "请仅提交一种订阅来源", http.StatusBadRequest)
+		return
+	}
 	if req.Name == "" {
 		req.Name = "贡献订阅"
+	}
+	if req.URL != "" {
+		if err := validateContributionURL(req.URL); err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if len(req.FileContent) > contributionMaxFileBytes {
+		jsonError(w, "上传文件过大", http.StatusRequestEntityTooLarge)
+		return
 	}
 
 	// 如果上传了文件，保存到本地
@@ -713,7 +870,7 @@ func (s *Server) apiSubscriptionContribute(w http.ResponseWriter, r *http.Reques
 	}
 
 	// 入库
-	refreshMin := config.Get().CustomRefreshInterval
+	refreshMin := s.currentConfig().CustomRefreshInterval
 	var id int64
 	var err error
 	if req.URL != "" {
@@ -768,7 +925,7 @@ func (s *Server) apiSubscriptionAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.RefreshMin <= 0 {
-		req.RefreshMin = config.Get().CustomRefreshInterval
+		req.RefreshMin = s.currentConfig().CustomRefreshInterval
 	}
 	if req.Name == "" {
 		req.Name = "订阅"

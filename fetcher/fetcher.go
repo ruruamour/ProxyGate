@@ -5,12 +5,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"strings"
 	"time"
 
-	"goproxy/config"
-	"goproxy/storage"
+	"proxygate/config"
+	"proxygate/storage"
 )
 
 // 代理来源定义
@@ -148,10 +149,9 @@ func (f *Fetcher) selectRandomSources(sources []Source, count int, preferredProt
 	// 随机打乱
 	shuffled := make([]Source, len(available))
 	copy(shuffled, available)
-	for i := range shuffled {
-		j := i + int(time.Now().UnixNano())%(len(shuffled)-i)
+	rand.Shuffle(len(shuffled), func(i, j int) {
 		shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
-	}
+	})
 
 	return shuffled[:count]
 }
@@ -212,49 +212,6 @@ func (f *Fetcher) fetchFromSources(sources []Source) ([]storage.Proxy, error) {
 		return nil, fmt.Errorf("no proxies fetched")
 	}
 	log.Printf("[fetch] 总共抓取: %d 个代理（去重后）", len(all))
-	return all, nil
-}
-
-// Fetch 从所有来源并发抓取代理
-func (f *Fetcher) Fetch() ([]storage.Proxy, error) {
-	type result struct {
-		proxies []storage.Proxy
-		source  Source
-		err     error
-	}
-
-	ch := make(chan result, len(f.sources))
-	for _, src := range f.sources {
-		go func(s Source) {
-			proxies, err := f.fetchFromURL(s.URL, s.Protocol)
-			ch <- result{proxies: proxies, source: s, err: err}
-		}(src)
-	}
-
-	var all []storage.Proxy
-	seen := make(map[string]bool)
-	for range f.sources {
-		r := <-ch
-		if r.err != nil {
-			log.Printf("fetch %s error: %v", r.source.URL, r.err)
-			continue
-		}
-		// 去重
-		var deduped []storage.Proxy
-		for _, p := range r.proxies {
-			if !seen[p.Address] {
-				seen[p.Address] = true
-				deduped = append(deduped, p)
-			}
-		}
-		log.Printf("fetched %d %s proxies from %s", len(deduped), r.source.Protocol, r.source.URL)
-		all = append(all, deduped...)
-	}
-
-	if len(all) == 0 {
-		return nil, fmt.Errorf("no proxies fetched")
-	}
-	log.Printf("total fetched: %d proxies (deduped)", len(all))
 	return all, nil
 }
 

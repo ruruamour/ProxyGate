@@ -3,6 +3,7 @@ package storage
 import (
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func newTestStorage(t *testing.T) *Storage {
@@ -133,10 +134,20 @@ func TestSelectProxySnapshotRefreshesAfterLatencyUpdate(t *testing.T) {
 
 	selected, err = store.SelectProxy("free", "http", "SG", "", nil, true)
 	if err != nil {
-		t.Fatalf("SelectProxy(after UpdateLatency) error = %v", err)
+		t.Fatalf("SelectProxy(immediate after UpdateLatency) error = %v", err)
+	}
+	if selected.Address != "6.6.6.6:80" {
+		t.Fatalf("SelectProxy(immediate after UpdateLatency) = %s, want %s", selected.Address, "6.6.6.6:80")
+	}
+
+	time.Sleep(selectionSnapshotMinTTL + 100*time.Millisecond)
+
+	selected, err = store.SelectProxy("free", "http", "SG", "", nil, true)
+	if err != nil {
+		t.Fatalf("SelectProxy(after snapshot TTL) error = %v", err)
 	}
 	if selected.Address != "5.5.5.5:80" {
-		t.Fatalf("SelectProxy(after UpdateLatency) = %s, want %s", selected.Address, "5.5.5.5:80")
+		t.Fatalf("SelectProxy(after snapshot TTL) = %s, want %s", selected.Address, "5.5.5.5:80")
 	}
 }
 
