@@ -64,12 +64,20 @@ docker compose up -d
 # http://localhost:7778（默认密码：proxygate）
 ```
 
+默认 `docker compose up -d` 会直接拉取预构建镜像 `ghcr.io/ruruamour/proxygate:latest`，更适合生产部署和首次安装。
+
 自定义配置：
 
 ```bash
 cp .env.example .env
 vim .env  # 修改密码、认证、地理过滤等
 docker compose up -d
+```
+
+如需在本机从源码构建镜像：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
 ### 本地运行
@@ -237,6 +245,21 @@ docker run -d --name proxygate \
   -v proxygate-data:/app/data \
   ghcr.io/ruruamour/proxygate:latest
 ```
+
+### 从源码构建镜像
+
+适用于你修改了本仓库代码，想让容器运行本地最新代码：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+```
+
+可选构建参数：
+
+- `RUNTIME_BASE_IMAGE`：运行时基础镜像，默认 `docker.m.daocloud.io/library/debian:bookworm-slim`
+- `DOCKER_BUILD_HTTP_PROXY` / `DOCKER_BUILD_HTTPS_PROXY` / `DOCKER_BUILD_NO_PROXY`：构建阶段代理
+- `GO_DOWNLOAD_BASE`：Go 工具链下载地址
+- `SINGBOX_DOWNLOAD_BASE`：sing-box 下载地址
 
 ### 数据持久化
 

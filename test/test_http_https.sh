@@ -13,9 +13,9 @@ DELAY=2
 # 测试目标（HTTPS 网站）
 TARGETS=(
     "https://www.google.com"
-    "https://www.openai.com"
     "https://www.github.com"
     "https://www.cloudflare.com"
+    "https://cp.cloudflare.com"
     "https://httpbin.org/ip"
 )
 

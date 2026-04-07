@@ -1003,6 +1003,9 @@ func (s *Server) apiSubscriptionAdd(w http.ResponseWriter, r *http.Request) {
 
 	id, err := s.storage.AddSubscription(req.Name, req.URL, filePath, "auto", req.RefreshMin)
 	if err != nil {
+		if filePath != "" {
+			_ = os.Remove(filePath)
+		}
 		jsonError(w, "add subscription error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1034,22 +1037,28 @@ func (s *Server) apiSubscriptionDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 先删除该订阅关联的代理
 	if s.customMgr != nil {
-		deleted, _ := s.storage.DeleteBySubscriptionID(req.ID)
-		if deleted > 0 {
-			log.Printf("[webui] 清理订阅 #%d 关联的 %d 个代理", req.ID, deleted)
+		if err := s.customMgr.DeleteSubscription(req.ID); err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
 		}
-	}
-
-	if err := s.storage.DeleteSubscription(req.ID); err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// 重建 sing-box 配置（剩余订阅的节点）
-	if s.customMgr != nil {
-		go s.customMgr.RefreshAll()
+	} else {
+		sub, err := s.storage.GetSubscription(req.ID)
+		if err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if _, err := s.storage.DeleteBySubscriptionID(req.ID); err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := s.storage.DeleteSubscription(req.ID); err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if sub.FilePath != "" {
+			_ = os.Remove(sub.FilePath)
+		}
 	}
 
 	log.Printf("[webui] 删除订阅 #%d", req.ID)

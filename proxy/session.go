@@ -22,16 +22,38 @@ type sessionEntry struct {
 	ExpiresAt time.Time
 }
 
+type sessionKeyLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+const sessionCleanupInterval = time.Minute
+
 type SessionManager struct {
-	mu       sync.RWMutex
-	sessions map[string]sessionEntry
-	locks    sync.Map
+	mu          sync.RWMutex
+	sessions    map[string]sessionEntry
+	lastCleanup time.Time
+	lockMu      sync.Mutex
+	locks       map[string]*sessionKeyLock
 }
 
 func NewSessionManager() *SessionManager {
 	return &SessionManager{
 		sessions: make(map[string]sessionEntry),
+		locks:    make(map[string]*sessionKeyLock),
 	}
+}
+
+func (m *SessionManager) cleanupExpiredSessionsLocked(now time.Time) {
+	if !m.lastCleanup.IsZero() && now.Sub(m.lastCleanup) < sessionCleanupInterval {
+		return
+	}
+	for key, entry := range m.sessions {
+		if now.After(entry.ExpiresAt) {
+			delete(m.sessions, key)
+		}
+	}
+	m.lastCleanup = now
 }
 
 func (m *SessionManager) Get(key string) (string, bool) {
@@ -62,11 +84,13 @@ func (m *SessionManager) Put(key, address string, ttl time.Duration) {
 		return
 	}
 
+	now := time.Now()
 	m.mu.Lock()
+	m.cleanupExpiredSessionsLocked(now)
 	defer m.mu.Unlock()
 	m.sessions[key] = sessionEntry{
 		Address:   address,
-		ExpiresAt: time.Now().Add(ttl),
+		ExpiresAt: now.Add(ttl),
 	}
 }
 
@@ -84,10 +108,28 @@ func (m *SessionManager) LockKey(key string) func() {
 		return func() {}
 	}
 
-	lockValue, _ := m.locks.LoadOrStore(key, &sync.Mutex{})
-	lock := lockValue.(*sync.Mutex)
-	lock.Lock()
-	return lock.Unlock
+	m.lockMu.Lock()
+	lock := m.locks[key]
+	if lock == nil {
+		lock = &sessionKeyLock{}
+		m.locks[key] = lock
+	}
+	lock.refs++
+	m.lockMu.Unlock()
+
+	lock.mu.Lock()
+	return func() {
+		lock.mu.Unlock()
+
+		m.lockMu.Lock()
+		defer m.lockMu.Unlock()
+		lock.refs--
+		if lock.refs == 0 {
+			if current := m.locks[key]; current == lock {
+				delete(m.locks, key)
+			}
+		}
+	}
 }
 
 func parseUsernameOptions(expectedBase, username string, namespace string) (RequestOptions, error) {

@@ -84,12 +84,12 @@
   - 详细文档：`GEO_FILTER.md`
 
 - **项目指南文档**
-  - 新增 `CLAUDE.md`，提供项目架构、设计模式、代码规范的完整指导
+  - 新增项目架构与运维文档，提供模块边界、设计模式、代码规范的完整指导
   - 包含模块依赖流程图、后台协程说明、端口映射表等
 
 - **HTTPS 可用性验证增强**
   - HTTP 协议代理入池前增加 HTTPS CONNECT 隧道验证
-  - 随机访问真实 HTTPS 网站（Google/GitHub/OpenAI 等）确认可用性
+  - 随机访问真实 HTTPS 网站（Google/GitHub/Cloudflare 等）确认可用性
   - 失败自动切换验证站点重试，确保入池的 HTTP 代理都能访问 HTTPS
   - 新增测试脚本：`test/test_http_https.sh` 用于持续测试 HTTPS 访问能力
 

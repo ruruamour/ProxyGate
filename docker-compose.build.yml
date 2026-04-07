@@ -1,0 +1,17 @@
+services:
+  proxygate:
+    build:
+      context: .
+      args:
+        RUNTIME_BASE_IMAGE: ${RUNTIME_BASE_IMAGE:-docker.m.daocloud.io/library/debian:bookworm-slim}
+        GO_VERSION: ${GO_VERSION:-1.25.0}
+        GO_DOWNLOAD_BASE: ${GO_DOWNLOAD_BASE:-https://golang.google.cn/dl}
+        SINGBOX_DOWNLOAD_BASE: ${SINGBOX_DOWNLOAD_BASE:-https://ghproxy.net/https://github.com/SagerNet/sing-box/releases/download}
+        HTTP_PROXY: ${DOCKER_BUILD_HTTP_PROXY:-}
+        HTTPS_PROXY: ${DOCKER_BUILD_HTTPS_PROXY:-}
+        NO_PROXY: ${DOCKER_BUILD_NO_PROXY:-}
+        http_proxy: ${DOCKER_BUILD_HTTP_PROXY:-}
+        https_proxy: ${DOCKER_BUILD_HTTPS_PROXY:-}
+        no_proxy: ${DOCKER_BUILD_NO_PROXY:-}
+    image: ${PROXYGATE_BUILD_IMAGE:-proxygate:local}
+    pull_policy: never

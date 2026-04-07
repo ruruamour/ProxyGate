@@ -33,6 +33,7 @@ const externalSubscriptionRedirectLimit = 5
 type Manager struct {
 	storage   *storage.Storage
 	validator *validator.Validator
+	cfg       *config.Config
 	singbox   *SingBoxProcess
 	nodeCache map[int64][]ParsedNode
 	stopCh    chan struct{}
@@ -54,10 +55,32 @@ func NewManager(store *storage.Storage, v *validator.Validator, cfg *config.Conf
 	return &Manager{
 		storage:   store,
 		validator: v,
+		cfg:       cfg,
 		singbox:   NewSingBoxProcess(cfg.SingBoxPath, dataDir, cfg.SingBoxBasePort),
 		nodeCache: make(map[int64][]ParsedNode),
 		stopCh:    make(chan struct{}),
 	}
+}
+
+func (m *Manager) currentConfig() *config.Config {
+	if cfg := config.Get(); cfg != nil {
+		return cfg
+	}
+	return m.cfg
+}
+
+func (m *Manager) currentValidator(concurrency int) *validator.Validator {
+	cfg := m.currentConfig()
+	if cfg != nil {
+		if concurrency <= 0 {
+			concurrency = cfg.ValidateConcurrency
+		}
+		return validator.New(concurrency, cfg.ValidateTimeout, cfg.ValidateURL)
+	}
+	if m.validator != nil {
+		return m.validator
+	}
+	return validator.New(1, 10, "")
 }
 
 // Start 启动后台循环
@@ -120,8 +143,11 @@ func (m *Manager) refreshLoop() {
 
 // checkAndRefresh 检查并刷新到期的订阅 + 清理长期无可用节点的订阅
 func (m *Manager) checkAndRefresh() {
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+
 	// 清理连续 7 天无可用节点的订阅
-	m.cleanupStaleSubscriptions()
+	m.cleanupStaleSubscriptionsLocked()
 
 	subs, err := m.storage.GetSubscriptions()
 	if err != nil {
@@ -150,9 +176,6 @@ func (m *Manager) checkAndRefresh() {
 		log.Printf("[custom] 🔄 订阅 [%s] 到期，加入本轮批量刷新", sub.Name)
 	}
 
-	m.refreshMu.Lock()
-	defer m.refreshMu.Unlock()
-
 	pendingValidation := m.refreshSubscriptionsLocked(dueSubs, false)
 	for subID, proxies := range pendingValidation {
 		if len(proxies) == 0 {
@@ -162,22 +185,20 @@ func (m *Manager) checkAndRefresh() {
 	}
 }
 
-// cleanupStaleSubscriptions 清理连续 7 天无可用节点的订阅
-func (m *Manager) cleanupStaleSubscriptions() {
+// cleanupStaleSubscriptionsLocked 清理连续 7 天无可用节点的订阅
+func (m *Manager) cleanupStaleSubscriptionsLocked() {
 	staleSubs, err := m.storage.GetStaleSubscriptions(7)
 	if err != nil || len(staleSubs) == 0 {
 		return
 	}
 
 	for _, sub := range staleSubs {
-		deleted, _ := m.storage.DeleteBySubscriptionID(sub.ID)
-		m.storage.DeleteSubscription(sub.ID)
+		deleted, err := m.deleteSubscriptionLocked(&sub)
+		if err != nil {
+			log.Printf("[custom] ❌ 自动移除订阅 [%s] 失败: %v", sub.Name, err)
+			continue
+		}
 		log.Printf("[custom] 🗑️ 自动移除订阅 [%s]：连续 7 天无可用节点（清理 %d 个代理）", sub.Name, deleted)
-	}
-
-	// 重建 sing-box 配置
-	if len(staleSubs) > 0 {
-		m.RefreshAll()
 	}
 }
 
@@ -187,7 +208,7 @@ func (m *Manager) probeLoop() {
 	time.Sleep(5 * time.Second)
 
 	for {
-		cfg := config.Get()
+		cfg := m.currentConfig()
 		interval := time.Duration(cfg.CustomProbeInterval) * time.Minute
 		if interval < time.Minute {
 			interval = 10 * time.Minute
@@ -211,10 +232,11 @@ func (m *Manager) probeDisabled() {
 
 	log.Printf("[custom] 🔍 探测 %d 个禁用的订阅代理", len(disabled))
 
+	probeValidator := m.currentValidator(1)
 	recovered := 0
 	recoveredSubs := make(map[int64]bool)
 	for _, proxy := range disabled {
-		valid, latency, exitIP, exitLocation := m.validator.ValidateOne(proxy)
+		valid, latency, exitIP, exitLocation := probeValidator.ValidateOne(proxy)
 		if valid {
 			latencyMs := int(latency.Milliseconds())
 			m.storage.EnableProxy(proxy.Address)
@@ -516,6 +538,54 @@ func (m *Manager) fetchSubscriptionData(sub *storage.Subscription) ([]byte, erro
 	return data, nil
 }
 
+func removeSubscriptionFile(filePath string) error {
+	filePath = strings.TrimSpace(filePath)
+	if filePath == "" {
+		return nil
+	}
+	if err := os.Remove(filePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func (m *Manager) deleteSubscriptionLocked(sub *storage.Subscription) (int64, error) {
+	if sub == nil {
+		return 0, fmt.Errorf("subscription is nil")
+	}
+
+	delete(m.nodeCache, sub.ID)
+
+	deleted, err := m.storage.DeleteBySubscriptionID(sub.ID)
+	if err != nil {
+		return deleted, err
+	}
+	if err := m.storage.DeleteSubscription(sub.ID); err != nil {
+		return deleted, err
+	}
+	if err := removeSubscriptionFile(sub.FilePath); err != nil {
+		log.Printf("[custom] ⚠️ 删除订阅文件失败 [%s]: %v", sub.FilePath, err)
+	}
+	if err := m.reloadAllTunnelNodesLocked(); err != nil {
+		log.Printf("[custom] ⚠️ 订阅删除后重载 sing-box 失败: %v", err)
+	}
+
+	return deleted, nil
+}
+
+func (m *Manager) DeleteSubscription(subID int64) error {
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+
+	sub, err := m.storage.GetSubscription(subID)
+	if err != nil {
+		return err
+	}
+
+	_, err = m.deleteSubscriptionLocked(sub)
+	return err
+}
+
 // fetchWithRetry 使用多个常见 User-Agent 直连拉取订阅。
 // 订阅 URL 往往携带 token，绝不能转交给池内代理，避免泄露认证信息。
 func (m *Manager) fetchWithRetry(urlStr string) ([]byte, error) {
@@ -701,7 +771,8 @@ func (m *Manager) validateCustomProxies(proxies []storage.Proxy, subID int64) in
 
 	log.Printf("[custom] 🔍 开始验证 %d 个订阅代理", len(proxies))
 
-	resultCh := m.validator.ValidateStream(proxies)
+	validate := m.currentValidator(0)
+	resultCh := validate.ValidateStream(proxies)
 	valid, invalid := 0, 0
 	for result := range resultCh {
 		if result.Valid {

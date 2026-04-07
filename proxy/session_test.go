@@ -127,3 +127,45 @@ func TestSelectProxyKeepsStickyAcrossSourcePriority(t *testing.T) {
 		t.Fatalf("expected sticky proxy %s, got %s", proxies[0].Address, selected.Address)
 	}
 }
+
+func TestSessionManagerReleasesPerKeyLocks(t *testing.T) {
+	sessions := NewSessionManager()
+
+	unlock := sessions.LockKey("sticky-key")
+
+	sessions.lockMu.Lock()
+	if len(sessions.locks) != 1 {
+		sessions.lockMu.Unlock()
+		t.Fatalf("len(locks) = %d, want 1", len(sessions.locks))
+	}
+	sessions.lockMu.Unlock()
+
+	unlock()
+
+	sessions.lockMu.Lock()
+	defer sessions.lockMu.Unlock()
+	if len(sessions.locks) != 0 {
+		t.Fatalf("len(locks) = %d, want 0", len(sessions.locks))
+	}
+}
+
+func TestSessionManagerPutCleansExpiredEntries(t *testing.T) {
+	sessions := NewSessionManager()
+	now := time.Now()
+	sessions.sessions["expired"] = sessionEntry{
+		Address:   "127.0.0.1:10001",
+		ExpiresAt: now.Add(-time.Minute),
+	}
+	sessions.lastCleanup = now.Add(-2 * sessionCleanupInterval)
+
+	sessions.Put("fresh", "127.0.0.1:10002", 5*time.Minute)
+
+	sessions.mu.RLock()
+	defer sessions.mu.RUnlock()
+	if _, ok := sessions.sessions["expired"]; ok {
+		t.Fatal("expired session still present after Put cleanup")
+	}
+	if _, ok := sessions.sessions["fresh"]; !ok {
+		t.Fatal("fresh session missing after Put")
+	}
+}
