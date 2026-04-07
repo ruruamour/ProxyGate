@@ -1,5 +1,7 @@
 # ProxyGate
 
+[简体中文](README.md) | [English](README_EN.md)
+
 > **自托管代理网关** — 聚合公开代理与订阅节点，统一验证入池，通过统一 HTTP/SOCKS5 网关输出并支持会话粘性
 
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
