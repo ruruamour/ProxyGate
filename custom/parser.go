@@ -24,6 +24,14 @@ type ParsedNode struct {
 	Raw    map[string]interface{} // 原始配置字段（用于生成 sing-box 配置）
 }
 
+func rawString(raw map[string]interface{}, key string) string {
+	if raw == nil {
+		return ""
+	}
+	value, _ := raw[key].(string)
+	return strings.TrimSpace(value)
+}
+
 // NodeKey 节点去重 key
 func (n *ParsedNode) NodeKey() string {
 	payload := struct {
@@ -47,7 +55,13 @@ func (n *ParsedNode) NodeKey() string {
 
 // IsDirect 是否可以直接作为代理使用（不需要 sing-box 转换）
 func (n *ParsedNode) IsDirect() bool {
-	return n.Type == "http" || n.Type == "socks5"
+	if n.Type != "http" && n.Type != "socks5" {
+		return false
+	}
+	if tls, ok := n.Raw["tls"].(bool); ok && tls {
+		return false
+	}
+	return rawString(n.Raw, "username") == "" && rawString(n.Raw, "password") == ""
 }
 
 // DirectAddress 返回直接代理的地址
@@ -228,13 +242,13 @@ func extractProxiesFromNode(doc *yaml.Node) []map[string]interface{} {
 	for i := 0; i < len(root.Content)-1; i += 2 {
 		keyNode := root.Content[i]
 		valNode := root.Content[i+1]
-			if keyNode.Value == "proxies" || keyNode.Value == "Proxy" {
-				log.Printf("[custom] 找到 %s 字段: kind=%d tag=%s 子节点数=%d",
-					keyNode.Value, valNode.Kind, valNode.Tag, len(valNode.Content))
+		if keyNode.Value == "proxies" || keyNode.Value == "Proxy" {
+			log.Printf("[custom] 找到 %s 字段: kind=%d tag=%s 子节点数=%d",
+				keyNode.Value, valNode.Kind, valNode.Tag, len(valNode.Content))
 
-				if valNode.Kind != yaml.SequenceNode {
-					log.Printf("[custom] proxies 字段不是列表（kind=%d tag=%s）", valNode.Kind, valNode.Tag)
-					return nil
+			if valNode.Kind != yaml.SequenceNode {
+				log.Printf("[custom] proxies 字段不是列表（kind=%d tag=%s）", valNode.Kind, valNode.Tag)
+				return nil
 			}
 			// 每个 item 是一个 MappingNode，解码为 map
 			var proxies []map[string]interface{}
@@ -377,6 +391,11 @@ func parsePlain(data []byte) ([]ParsedNode, error) {
 			continue
 		}
 
+		if node, ok := parsePlainProxyURL(line); ok {
+			nodes = append(nodes, node)
+			continue
+		}
+
 		protocol := "http"
 		addr := line
 
@@ -415,6 +434,69 @@ func parsePlain(data []byte) ([]ParsedNode, error) {
 
 	log.Printf("[custom] 纯文本解析完成，共 %d 个节点", len(nodes))
 	return nodes, nil
+}
+
+func parsePlainProxyURL(line string) (ParsedNode, bool) {
+	u, err := url.Parse(line)
+	if err != nil || u == nil || u.Host == "" {
+		return ParsedNode{}, false
+	}
+
+	scheme := strings.ToLower(strings.TrimSpace(u.Scheme))
+	protocol := ""
+	defaultPort := ""
+	switch scheme {
+	case "http":
+		protocol = "http"
+		defaultPort = "80"
+	case "https":
+		protocol = "http"
+		defaultPort = "443"
+	case "socks5", "socks4":
+		protocol = "socks5"
+		defaultPort = "1080"
+	default:
+		return ParsedNode{}, false
+	}
+
+	host := strings.TrimSpace(u.Hostname())
+	if host == "" {
+		return ParsedNode{}, false
+	}
+	portStr := strings.TrimSpace(u.Port())
+	if portStr == "" {
+		portStr = defaultPort
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return ParsedNode{}, false
+	}
+
+	raw := map[string]interface{}{
+		"type":   protocol,
+		"server": host,
+		"port":   port,
+	}
+	if scheme == "https" {
+		raw["tls"] = true
+	}
+	if u.User != nil {
+		if username := strings.TrimSpace(u.User.Username()); username != "" {
+			raw["username"] = username
+		}
+		if password, ok := u.User.Password(); ok && password != "" {
+			raw["password"] = password
+		}
+	}
+
+	name := net.JoinHostPort(host, strconv.Itoa(port))
+	return ParsedNode{
+		Name:   name,
+		Type:   protocol,
+		Server: host,
+		Port:   port,
+		Raw:    raw,
+	}, true
 }
 
 // parseProxyLinks 解析协议链接格式（vmess://, trojan://, ss://, vless:// 等）

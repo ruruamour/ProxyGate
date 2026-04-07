@@ -90,3 +90,12 @@ func TestSaveClonesCallerInput(t *testing.T) {
 		t.Fatalf("fresh fallback URLs = %v, want original value", fresh.ValidateFallbackURLs)
 	}
 }
+
+func TestDefaultConfigDisablesLocalAuthBypassByDefault(t *testing.T) {
+	t.Setenv("LOCAL_AUTH_BYPASS", "")
+
+	cfg := DefaultConfig()
+	if cfg.LocalAuthBypass {
+		t.Fatal("DefaultConfig() LocalAuthBypass = true, want false by default")
+	}
+}

@@ -1,11 +1,14 @@
 package custom
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -23,6 +26,8 @@ var subscriptionUserAgents = []string{
 	"clash-verge/v2.0.0",
 	"Clash.Meta",
 }
+
+const externalSubscriptionRedirectLimit = 5
 
 // Manager 订阅管理器
 type Manager struct {
@@ -497,8 +502,14 @@ func (m *Manager) fetchSubscriptionData(sub *storage.Subscription) ([]byte, erro
 		return nil, fmt.Errorf("订阅未配置 URL 或文件路径")
 	}
 
-	// 尝试拉取（直连 → 代理）
-	data, err := m.fetchWithRetry(sub.URL)
+	// 访客贡献订阅按公网 URL 约束抓取，避免把服务端当作 SSRF 跳板。
+	fetchFn := m.fetchWithRetry
+	if sub.Contributed {
+		fetchFn = m.fetchPublicURL
+	}
+
+	// 尝试拉取（直连）
+	data, err := fetchFn(sub.URL)
 	if err != nil {
 		return nil, err
 	}
@@ -511,11 +522,136 @@ func (m *Manager) fetchWithRetry(urlStr string) ([]byte, error) {
 	return m.fetchURL(urlStr)
 }
 
+func isBlockedSubscriptionIP(ip net.IP) bool {
+	return ip == nil ||
+		ip.IsLoopback() ||
+		ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() ||
+		ip.IsUnspecified()
+}
+
+func validatePublicSubscriptionURL(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fmt.Errorf("订阅 URL 不能为空")
+	}
+
+	u, err := url.ParseRequestURI(raw)
+	if err != nil {
+		return fmt.Errorf("订阅 URL 无效")
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https":
+	default:
+		return fmt.Errorf("仅支持 http/https 订阅 URL")
+	}
+
+	host := strings.ToLower(strings.TrimSpace(u.Hostname()))
+	if host == "" {
+		return fmt.Errorf("订阅 URL 缺少主机名")
+	}
+	if host == "localhost" || strings.HasSuffix(host, ".local") {
+		return fmt.Errorf("不允许本地地址")
+	}
+	if ip := net.ParseIP(host); ip != nil && isBlockedSubscriptionIP(ip) {
+		return fmt.Errorf("不允许内网或本地地址")
+	}
+
+	return nil
+}
+
+func ensurePublicSubscriptionHost(ctx context.Context, host string) error {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return fmt.Errorf("empty host")
+	}
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".local") {
+		return fmt.Errorf("local host is not allowed")
+	}
+
+	if ip := net.ParseIP(host); ip != nil {
+		if isBlockedSubscriptionIP(ip) {
+			return fmt.Errorf("blocked ip %s", ip.String())
+		}
+		return nil
+	}
+
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return err
+	}
+	if len(addrs) == 0 {
+		return fmt.Errorf("no addresses resolved for %s", host)
+	}
+	for _, addr := range addrs {
+		if isBlockedSubscriptionIP(addr.IP) {
+			return fmt.Errorf("blocked resolved address %s", addr.IP.String())
+		}
+	}
+	return nil
+}
+
+func newPublicSubscriptionHTTPClient(timeout time.Duration) *http.Client {
+	dialer := &net.Dialer{Timeout: minDuration(timeout, 10*time.Second)}
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			host, _, err := net.SplitHostPort(address)
+			if err != nil {
+				return nil, err
+			}
+			if err := ensurePublicSubscriptionHost(ctx, host); err != nil {
+				return nil, err
+			}
+			return dialer.DialContext(ctx, network, address)
+		},
+	}
+
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= externalSubscriptionRedirectLimit {
+				return fmt.Errorf("stopped after %d redirects", externalSubscriptionRedirectLimit)
+			}
+			return validatePublicSubscriptionURL(req.URL.String())
+		},
+	}
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if a <= 0 {
+		return b
+	}
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func (m *Manager) fetchPublicURL(urlStr string) ([]byte, error) {
+	if err := validatePublicSubscriptionURL(urlStr); err != nil {
+		return nil, err
+	}
+	return m.fetchURLWithClient(urlStr, newPublicSubscriptionHTTPClient(30*time.Second))
+}
+
 // fetchURL 直连拉取 URL 内容。
 func (m *Manager) fetchURL(urlStr string) ([]byte, error) {
 	transport := &http.Transport{}
-	defer transport.CloseIdleConnections()
 	client := &http.Client{Timeout: 30 * time.Second, Transport: transport}
+	return m.fetchURLWithClient(urlStr, client)
+}
+
+func (m *Manager) fetchURLWithClient(urlStr string, client *http.Client) ([]byte, error) {
+	if client == nil {
+		return nil, fmt.Errorf("http client is nil")
+	}
+	if transport, ok := client.Transport.(*http.Transport); ok && transport != nil {
+		defer transport.CloseIdleConnections()
+	}
 	var lastErr error
 	for _, ua := range subscriptionUserAgents {
 		req, err := http.NewRequest("GET", urlStr, nil)
@@ -551,6 +687,9 @@ func (m *Manager) fetchURL(urlStr string) ([]byte, error) {
 		return body, nil
 	}
 
+	if lastErr != nil && errors.Is(lastErr, context.DeadlineExceeded) {
+		return nil, fmt.Errorf("request timeout: %w", lastErr)
+	}
 	return nil, lastErr
 }
 
@@ -611,7 +750,7 @@ func (m *Manager) ValidateSubscription(url, filePath string) (int, error) {
 			return 0, fmt.Errorf("读取文件失败: %w", err)
 		}
 	} else if url != "" {
-		data, err = m.fetchWithRetry(url)
+		data, err = m.fetchPublicURL(url)
 		if err != nil {
 			return 0, err
 		}

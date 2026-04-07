@@ -236,6 +236,25 @@ func buildOutbound(node ParsedNode, tag string) map[string]interface{} {
 		// anytls 强制启用 TLS
 		forceTLS(raw, out)
 
+	case "http":
+		out["type"] = "http"
+		if username := getStr(raw, "username"); username != "" {
+			out["username"] = username
+		}
+		if password := getStr(raw, "password"); password != "" {
+			out["password"] = password
+		}
+		applyTLS(raw, out)
+
+	case "socks5":
+		out["type"] = "socks"
+		if username := getStr(raw, "username"); username != "" {
+			out["username"] = username
+		}
+		if password := getStr(raw, "password"); password != "" {
+			out["password"] = password
+		}
+
 	default:
 		return nil
 	}

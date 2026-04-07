@@ -82,3 +82,55 @@ func TestBuildOutboundDoesNotMutateNodeKeyForAnytls(t *testing.T) {
 		t.Fatalf("node key mutated after buildOutbound: before=%s after=%s", before, after)
 	}
 }
+
+func TestBuildOutboundSupportsAuthenticatedDirectProxies(t *testing.T) {
+	httpNode := ParsedNode{
+		Type:   "http",
+		Server: "proxy.example.com",
+		Port:   8443,
+		Raw: map[string]interface{}{
+			"username": "alice",
+			"password": "wonderland",
+			"tls":      true,
+		},
+	}
+	httpOutbound := buildOutbound(httpNode, "http-node")
+	if httpOutbound == nil {
+		t.Fatal("http outbound = nil")
+	}
+	if got := httpOutbound["type"]; got != "http" {
+		t.Fatalf("http outbound type = %v, want http", got)
+	}
+	if got := httpOutbound["username"]; got != "alice" {
+		t.Fatalf("http outbound username = %v, want alice", got)
+	}
+	if got := httpOutbound["password"]; got != "wonderland" {
+		t.Fatalf("http outbound password = %v, want wonderland", got)
+	}
+	if _, ok := httpOutbound["tls"]; !ok {
+		t.Fatal("http outbound tls missing")
+	}
+
+	socksNode := ParsedNode{
+		Type:   "socks5",
+		Server: "socks.example.com",
+		Port:   1080,
+		Raw: map[string]interface{}{
+			"username": "bob",
+			"password": "secret",
+		},
+	}
+	socksOutbound := buildOutbound(socksNode, "socks-node")
+	if socksOutbound == nil {
+		t.Fatal("socks outbound = nil")
+	}
+	if got := socksOutbound["type"]; got != "socks" {
+		t.Fatalf("socks outbound type = %v, want socks", got)
+	}
+	if got := socksOutbound["username"]; got != "bob" {
+		t.Fatalf("socks outbound username = %v, want bob", got)
+	}
+	if got := socksOutbound["password"]; got != "secret" {
+		t.Fatalf("socks outbound password = %v, want secret", got)
+	}
+}

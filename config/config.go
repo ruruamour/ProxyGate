@@ -175,7 +175,7 @@ func DefaultConfig() *Config {
 		proxyAuthUsername = "proxy"
 	}
 	proxyAuthPassword := os.Getenv("PROXY_AUTH_PASSWORD")
-	localAuthBypass := envBoolDefault("LOCAL_AUTH_BYPASS", true)
+	localAuthBypass := envBoolDefault("LOCAL_AUTH_BYPASS", false)
 	proxyAuthHash := ""
 	if proxyAuthPassword != "" {
 		proxyAuthHash = passwordHash(proxyAuthPassword)

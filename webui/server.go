@@ -152,6 +152,34 @@ func requestClientIP(remoteAddr string) string {
 	return strings.TrimSpace(remoteAddr)
 }
 
+func maskGuestAddress(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+
+	sum := sha256.Sum256([]byte(raw))
+	tag := hex.EncodeToString(sum[:3])
+	if _, port, err := net.SplitHostPort(raw); err == nil && port != "" {
+		return "node-" + tag + ":" + port
+	}
+	return "node-" + tag
+}
+
+func sanitizeProxyForGuest(p storage.Proxy) storage.Proxy {
+	sanitized := p
+	sanitized.Address = maskGuestAddress(p.Address)
+	sanitized.ExitIP = ""
+	return sanitized
+}
+
+func sanitizeSubscriptionForGuest(sub storage.Subscription) storage.Subscription {
+	sanitized := sub
+	sanitized.URL = ""
+	sanitized.FilePath = ""
+	return sanitized
+}
+
 func allowContribution(remoteAddr string, now time.Time) (time.Duration, bool) {
 	clientIP := requestClientIP(remoteAddr)
 	if clientIP == "" {
@@ -443,6 +471,14 @@ func (s *Server) apiProxies(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !validSession(r) {
+		sanitized := make([]storage.Proxy, 0, len(proxies))
+		for _, p := range proxies {
+			sanitized = append(sanitized, sanitizeProxyForGuest(p))
+		}
+		jsonOK(w, sanitized)
 		return
 	}
 	jsonOK(w, proxies)
@@ -761,6 +797,9 @@ func (s *Server) apiSubscriptions(w http.ResponseWriter, r *http.Request) {
 	var result []subWithStats
 	for _, sub := range subs {
 		active, disabled := s.storage.CountBySubscriptionID(sub.ID)
+		if !validSession(r) {
+			sub = sanitizeSubscriptionForGuest(sub)
+		}
 		result = append(result, subWithStats{
 			Subscription:  sub,
 			ActiveCount:   active,
