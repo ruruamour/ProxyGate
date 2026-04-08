@@ -128,7 +128,7 @@ func TestAPIProxiesMasksSensitiveFieldsForGuests(t *testing.T) {
 		t.Fatalf("UpdateExitInfo(free) error = %v", err)
 	}
 
-	subID, err := srv.storage.AddSubscription("Private Sub", "https://example.com/sub?token=secret", "", "auto", 60)
+	subID, err := srv.storage.AddSubscription("Private Sub", "", "https://example.com/sub?token=secret", "", "auto", 60)
 	if err != nil {
 		t.Fatalf("AddSubscription() error = %v", err)
 	}
@@ -172,11 +172,11 @@ func TestAPIProxiesMasksSensitiveFieldsForGuests(t *testing.T) {
 func TestAPISubscriptionsHidesURLAndFilePathForGuests(t *testing.T) {
 	srv := newTestWebUIServer(t)
 
-	subID, err := srv.storage.AddSubscription("Secret URL", "https://example.com/sub?token=topsecret", "", "auto", 60)
+	subID, err := srv.storage.AddSubscription("Secret URL", "", "https://example.com/sub?token=topsecret", "", "auto", 60)
 	if err != nil {
 		t.Fatalf("AddSubscription(url) error = %v", err)
 	}
-	if _, err := srv.storage.AddSubscription("Secret File", "", "/tmp/private-sub.yaml", "auto", 60); err != nil {
+	if _, err := srv.storage.AddSubscription("Secret File", "", "", "/tmp/private-sub.yaml", "auto", 60); err != nil {
 		t.Fatalf("AddSubscription(file) error = %v", err)
 	}
 	if err := srv.storage.AddProxyWithSource("127.0.0.1:20001", "socks5", "custom", subID); err != nil {

@@ -552,6 +552,16 @@ tr:hover{background:rgba(45,106,79,0.03)}
   border-radius:var(--radius-lg);
   background:var(--bg-soft);
 }
+.subscription-group{display:flex;flex-direction:column;gap:10px}
+.subscription-group + .subscription-group{margin-top:10px}
+.subscription-group-title{
+  padding:0 4px;
+  font-size:12px;
+  font-weight:800;
+  color:var(--fg-soft);
+  letter-spacing:.08em;
+  text-transform:uppercase;
+}
 .subscription-item-main{flex:1;min-width:0}
 .subscription-name-row{
   display:flex;
@@ -948,6 +958,10 @@ tr:hover{background:rgba(45,106,79,0.03)}
           <label data-i18n="sub.name">名称</label>
           <input type="text" id="sub-name" placeholder="">
         </div>
+        <div class="form-group">
+          <label data-i18n="sub.group">分组</label>
+          <input type="text" id="sub-group" placeholder="OpenList 节点">
+        </div>
         <div class="form-group" style="grid-column:1/-1">
           <label data-i18n="sub.import_mode">导入方式</label>
           <div style="display:flex;gap:8px;margin-bottom:8px">
@@ -1160,6 +1174,8 @@ const i18n = {
     // 添加订阅弹窗
     'sub.add_title': '添加订阅',
     'sub.name': '名称',
+    'sub.group': '分组',
+    'sub.ungrouped': '未分组',
     'sub.import_mode': '导入方式',
     'sub.tab_url': '订阅 URL',
     'sub.tab_file': '上传文件',
@@ -1312,6 +1328,8 @@ const i18n = {
     'sub.contributed': 'Contributed',
     'sub.add_title': 'Add Subscription',
     'sub.name': 'Name',
+    'sub.group': 'Group',
+    'sub.ungrouped': 'Ungrouped',
     'sub.import_mode': 'Import Mode',
     'sub.tab_url': 'URL',
     'sub.tab_file': 'Upload File',
@@ -1791,27 +1809,41 @@ async function loadSubscriptions() {
     return;
   }
 
-  el.innerHTML = subs.map(s => {
-    const statusIcon = s.status === 'active' ? '●' : '○';
-    const statusClass = s.status === 'active' ? 'subscription-status active' : 'subscription-status inactive';
-    const active = s.active_count || 0;
-    const disabled = s.disabled_count || 0;
-    const total = active + disabled;
-    const statsText = total + ' ' + t('sub.nodes') + ' · ' + active + ' ' + t('sub.available') + (disabled > 0 ? ' · ' + disabled + ' ' + t('sub.disabled_label') : '');
-    const badge = s.contributed ? '<span class="subscription-badge subscription-badge-warm">' + t('sub.contributed') + '</span>' : '';
-    return '<div class="subscription-item">' +
-      '<div class="subscription-item-main">' +
-        '<div class="subscription-name-row">' +
-          '<span class="' + statusClass + '">' + statusIcon + '</span>' +
-          '<span class="subscription-name">' + (s.name||t('sub.add_title')) + '</span>' + badge +
+  const groupedSubs = new Map();
+  subs.forEach(s => {
+    const groupName = (s.group_name || '').trim() || t('sub.ungrouped');
+    if (!groupedSubs.has(groupName)) groupedSubs.set(groupName, []);
+    groupedSubs.get(groupName).push(s);
+  });
+
+  el.innerHTML = Array.from(groupedSubs.entries()).map(([groupName, groupItems]) => {
+    const itemsHTML = groupItems.map(s => {
+      const statusIcon = s.status === 'active' ? '●' : '○';
+      const statusClass = s.status === 'active' ? 'subscription-status active' : 'subscription-status inactive';
+      const active = s.active_count || 0;
+      const disabled = s.disabled_count || 0;
+      const total = active + disabled;
+      const statsText = total + ' ' + t('sub.nodes') + ' · ' + active + ' ' + t('sub.available') + (disabled > 0 ? ' · ' + disabled + ' ' + t('sub.disabled_label') : '');
+      const badge = s.contributed ? '<span class="subscription-badge subscription-badge-warm">' + t('sub.contributed') + '</span>' : '';
+      return '<div class="subscription-item">' +
+        '<div class="subscription-item-main">' +
+          '<div class="subscription-name-row">' +
+            '<span class="' + statusClass + '">' + statusIcon + '</span>' +
+            '<span class="subscription-name">' + (s.name||t('sub.add_title')) + '</span>' + badge +
+          '</div>' +
+          '<div class="subscription-stats">' + statsText + '</div>' +
         '</div>' +
-        '<div class="subscription-stats">' + statsText + '</div>' +
-      '</div>' +
-      '<div class="subscription-actions">' +
-        '<button class="icon-btn" onclick="refreshSub(' + s.id + ')">↻</button>' +
-        '<button class="icon-btn" onclick="toggleSub(' + s.id + ')">' + (s.status === 'active' ? '⏸' : '▶') + '</button>' +
-        '<button class="icon-btn icon-btn-danger" onclick="deleteSub(' + s.id + ')">✕</button>' +
-      '</div>' +
+        '<div class="subscription-actions">' +
+          '<button class="icon-btn" onclick="refreshSub(' + s.id + ')">↻</button>' +
+          '<button class="icon-btn" onclick="toggleSub(' + s.id + ')">' + (s.status === 'active' ? '⏸' : '▶') + '</button>' +
+          '<button class="icon-btn icon-btn-danger" onclick="deleteSub(' + s.id + ')">✕</button>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+
+    return '<div class="subscription-group">' +
+      '<div class="subscription-group-title">' + groupName + '</div>' +
+      itemsHTML +
     '</div>';
   }).join('');
 
@@ -1881,6 +1913,7 @@ function openSubModal() {
   subFileContent = '';
   subTab = 'url';
   switchSubTab('url');
+  document.getElementById('sub-group').value = '';
   document.getElementById('sub-modal').style.display = 'flex';
 }
 
@@ -1890,10 +1923,11 @@ function closeSubModal() {
 
 async function addSubscription() {
   const name = document.getElementById('sub-name').value || t('sub.add_title');
+  const groupName = document.getElementById('sub-group').value;
   const url = document.getElementById('sub-url').value;
   const refreshMin = parseInt(document.getElementById('sub-refresh').value) || 60;
 
-  const data = { name, refresh_min: refreshMin };
+  const data = { name, group_name: groupName, refresh_min: refreshMin };
 
   if (subTab === 'url') {
     if (!url) { alert(t('msg.sub_url_required')); return; }
@@ -1917,6 +1951,7 @@ async function addSubscription() {
     closeSubModal();
     showToast(t('msg.sub_added'));
     document.getElementById('sub-name').value = '';
+    document.getElementById('sub-group').value = '';
     document.getElementById('sub-url').value = '';
     subFileContent = '';
     document.getElementById('sub-file-label').innerHTML = '' + t('sub.file_drop') + '';

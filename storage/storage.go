@@ -38,6 +38,7 @@ type Proxy struct {
 type Subscription struct {
 	ID          int64     `json:"id"`
 	Name        string    `json:"name"`
+	GroupName   string    `json:"group_name"`
 	URL         string    `json:"url"`
 	FilePath    string    `json:"file_path"`
 	Format      string    `json:"format"` // clash / plain / base64 / auto
@@ -258,6 +259,7 @@ func (s *Storage) initSchema() error {
 		CREATE TABLE IF NOT EXISTS subscriptions (
 			id            INTEGER PRIMARY KEY AUTOINCREMENT,
 			name          TEXT NOT NULL DEFAULT '',
+			group_name    TEXT NOT NULL DEFAULT '',
 			url           TEXT NOT NULL DEFAULT '',
 			file_path     TEXT NOT NULL DEFAULT '',
 			format        TEXT NOT NULL DEFAULT 'clash',
@@ -282,6 +284,11 @@ func (s *Storage) initSchema() error {
 	s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('subscriptions') WHERE name='last_success'`).Scan(&hasLastSuccess)
 	if hasLastSuccess == 0 {
 		s.db.Exec(`ALTER TABLE subscriptions ADD COLUMN last_success DATETIME`)
+	}
+	var hasGroupName int
+	s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('subscriptions') WHERE name='group_name'`).Scan(&hasGroupName)
+	if hasGroupName == 0 {
+		s.db.Exec(`ALTER TABLE subscriptions ADD COLUMN group_name TEXT NOT NULL DEFAULT ''`)
 	}
 
 	return nil
@@ -1351,7 +1358,7 @@ func (s *Storage) DeleteCustomProxiesNotIn(addresses []string) (int64, error) {
 // ========== 订阅 CRUD ==========
 
 // AddSubscription 添加订阅（自动去重：相同 URL 或 file_path 不重复添加）
-func (s *Storage) AddSubscription(name, url, filePath, format string, refreshMin int) (int64, error) {
+func (s *Storage) AddSubscription(name, groupName, url, filePath, format string, refreshMin int) (int64, error) {
 	// 去重检查
 	if url != "" {
 		var existID int64
@@ -1369,8 +1376,8 @@ func (s *Storage) AddSubscription(name, url, filePath, format string, refreshMin
 	}
 
 	res, err := s.db.Exec(
-		`INSERT INTO subscriptions (name, url, file_path, format, refresh_min) VALUES (?, ?, ?, ?, ?)`,
-		name, url, filePath, format, refreshMin,
+		`INSERT INTO subscriptions (name, group_name, url, file_path, format, refresh_min) VALUES (?, ?, ?, ?, ?, ?)`,
+		name, strings.TrimSpace(groupName), url, filePath, format, refreshMin,
 	)
 	if err != nil {
 		return 0, err
@@ -1404,7 +1411,7 @@ func (s *Storage) AddContributedSubscription(name, url string, refreshMin int) (
 	}
 
 	res, err := s.db.Exec(
-		`INSERT INTO subscriptions (name, url, format, refresh_min, contributed) VALUES (?, ?, 'auto', ?, 1)`,
+		`INSERT INTO subscriptions (name, group_name, url, format, refresh_min, contributed) VALUES (?, '', ?, 'auto', ?, 1)`,
 		name, url, refreshMin,
 	)
 	if err != nil {
@@ -1414,10 +1421,18 @@ func (s *Storage) AddContributedSubscription(name, url string, refreshMin int) (
 }
 
 // UpdateSubscription 更新订阅
-func (s *Storage) UpdateSubscription(id int64, name, url, filePath, format string, refreshMin int) error {
+func (s *Storage) UpdateSubscription(id int64, name, groupName, url, filePath, format string, refreshMin int) error {
 	_, err := s.db.Exec(
-		`UPDATE subscriptions SET name = ?, url = ?, file_path = ?, format = ?, refresh_min = ? WHERE id = ?`,
-		name, url, filePath, format, refreshMin, id,
+		`UPDATE subscriptions SET name = ?, group_name = ?, url = ?, file_path = ?, format = ?, refresh_min = ? WHERE id = ?`,
+		name, strings.TrimSpace(groupName), url, filePath, format, refreshMin, id,
+	)
+	return err
+}
+
+func (s *Storage) SetSubscriptionGroup(id int64, groupName string) error {
+	_, err := s.db.Exec(
+		`UPDATE subscriptions SET group_name = ? WHERE id = ?`,
+		strings.TrimSpace(groupName), id,
 	)
 	return err
 }
@@ -1521,13 +1536,13 @@ func (s *Storage) ToggleSubscription(id int64) error {
 
 // scanSubscription 扫描订阅行数据
 // subColumns 订阅表查询列
-const subColumns = `id, name, url, file_path, format, refresh_min, last_fetch, last_success, status, proxy_count, created_at, contributed`
+const subColumns = `id, name, group_name, url, file_path, format, refresh_min, last_fetch, last_success, status, proxy_count, created_at, contributed`
 
 func scanSubscription(rows *sql.Rows) (*Subscription, error) {
 	sub := &Subscription{}
 	var lastFetch, lastSuccess sql.NullTime
 	var contributed int
-	if err := rows.Scan(&sub.ID, &sub.Name, &sub.URL, &sub.FilePath, &sub.Format,
+	if err := rows.Scan(&sub.ID, &sub.Name, &sub.GroupName, &sub.URL, &sub.FilePath, &sub.Format,
 		&sub.RefreshMin, &lastFetch, &lastSuccess, &sub.Status, &sub.ProxyCount, &sub.CreatedAt, &contributed); err != nil {
 		return nil, err
 	}

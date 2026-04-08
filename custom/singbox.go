@@ -2,6 +2,7 @@ package custom
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -26,6 +27,18 @@ type SingBoxProcess struct {
 	mu         sync.Mutex
 	running    bool
 	waitCh     chan struct{}
+}
+
+type singBoxConfigCheckError struct {
+	Output string
+}
+
+func (e *singBoxConfigCheckError) Error() string {
+	output := strings.TrimSpace(e.Output)
+	if output == "" {
+		return "sing-box 配置无效"
+	}
+	return fmt.Sprintf("sing-box 配置无效: %s", output)
 }
 
 // NewSingBoxProcess 创建 sing-box 进程管理器
@@ -68,18 +81,56 @@ func (s *SingBoxProcess) Reload(nodes []ParsedNode) error {
 		return nil
 	}
 
-	// 生成配置
-	if err := s.generateConfig(tunnelNodes); err != nil {
-		return fmt.Errorf("生成 sing-box 配置失败: %w", err)
+	prevNodes := append([]ParsedNode(nil), s.nodes...)
+	prevPortMap := clonePortMap(s.portMap)
+	candidateNodes := append([]ParsedNode(nil), tunnelNodes...)
+
+	for {
+		// 生成配置
+		if err := s.generateConfig(candidateNodes); err != nil {
+			s.nodes = prevNodes
+			s.portMap = prevPortMap
+			return fmt.Errorf("生成 sing-box 配置失败: %w", err)
+		}
+
+		if err := s.checkConfigLocked(); err != nil {
+			filteredNodes, skippedNodes, retried := fallbackNodesForCheckError(candidateNodes, err)
+			if !retried {
+				s.nodes = prevNodes
+				s.portMap = prevPortMap
+				return fmt.Errorf("启动 sing-box 失败: %w", err)
+			}
+
+			var skippedTypes []string
+			for _, node := range skippedNodes {
+				skippedTypes = append(skippedTypes, fmt.Sprintf("%s(%s)", node.Name, node.Type))
+			}
+			log.Printf("[custom] sing-box 当前构建缺少 QUIC，自动跳过 %d 个节点: %s", len(skippedNodes), strings.Join(skippedTypes, ", "))
+
+			if len(filteredNodes) == 0 {
+				log.Println("[custom] 所有隧道节点均依赖 QUIC，当前 sing-box 无可加载节点")
+				s.stopLocked()
+				s.nodes = nil
+				s.portMap = make(map[string]int)
+				return nil
+			}
+
+			candidateNodes = filteredNodes
+			continue
+		}
+
+		break
 	}
 
 	// 重启进程
 	s.stopLocked()
 	if err := s.startLocked(); err != nil {
+		s.nodes = nil
+		s.portMap = make(map[string]int)
 		return fmt.Errorf("启动 sing-box 失败: %w", err)
 	}
 
-	s.nodes = tunnelNodes
+	s.nodes = candidateNodes
 	return nil
 }
 
@@ -262,6 +313,54 @@ func buildOutbound(node ParsedNode, tag string) map[string]interface{} {
 	return out
 }
 
+func clonePortMap(src map[string]int) map[string]int {
+	if len(src) == 0 {
+		return make(map[string]int)
+	}
+
+	cloned := make(map[string]int, len(src))
+	for key, port := range src {
+		cloned[key] = port
+	}
+	return cloned
+}
+
+func isQUICDependentNode(node ParsedNode) bool {
+	switch node.Type {
+	case "hysteria", "hysteria2", "tuic":
+		return true
+	default:
+		return false
+	}
+}
+
+func fallbackNodesForCheckError(nodes []ParsedNode, err error) ([]ParsedNode, []ParsedNode, bool) {
+	var checkErr *singBoxConfigCheckError
+	if !errors.As(err, &checkErr) {
+		return nodes, nil, false
+	}
+
+	output := strings.ToLower(checkErr.Output)
+	if !strings.Contains(output, "quic is not included in this build") && !strings.Contains(output, "with_quic") {
+		return nodes, nil, false
+	}
+
+	filtered := make([]ParsedNode, 0, len(nodes))
+	skipped := make([]ParsedNode, 0, len(nodes))
+	for _, node := range nodes {
+		if isQUICDependentNode(node) {
+			skipped = append(skipped, node)
+			continue
+		}
+		filtered = append(filtered, node)
+	}
+	if len(skipped) == 0 {
+		return nodes, nil, false
+	}
+
+	return filtered, skipped, true
+}
+
 // forceTLS 强制应用 TLS 配置（用于 anytls 等必须 TLS 的协议）
 func forceTLS(raw map[string]interface{}, out map[string]interface{}) {
 	tlsRaw := make(map[string]interface{}, len(raw)+1)
@@ -398,6 +497,21 @@ func convertPluginOpts(plugin string, opts map[string]interface{}) string {
 	return strings.Join(parts, ";")
 }
 
+func (s *SingBoxProcess) checkConfigLocked() error {
+	binPath, err := exec.LookPath(s.binPath)
+	if err != nil {
+		return fmt.Errorf("sing-box 未找到: %s（请安装 sing-box 或设置 SINGBOX_PATH）", s.binPath)
+	}
+
+	checkCmd := exec.Command(binPath, "check", "-c", s.configFile, "-D", s.configDir)
+	if checkOutput, err := checkCmd.CombinedOutput(); err != nil {
+		log.Printf("[custom] ❌ sing-box 配置检查失败:\n%s", string(checkOutput))
+		return &singBoxConfigCheckError{Output: string(checkOutput)}
+	}
+
+	return nil
+}
+
 // startLocked 启动 sing-box（需持有锁）
 func (s *SingBoxProcess) startLocked() error {
 	binPath, err := exec.LookPath(s.binPath)
@@ -406,10 +520,8 @@ func (s *SingBoxProcess) startLocked() error {
 	}
 
 	// 先检查配置是否有效
-	checkCmd := exec.Command(binPath, "check", "-c", s.configFile, "-D", s.configDir)
-	if checkOutput, err := checkCmd.CombinedOutput(); err != nil {
-		log.Printf("[custom] ❌ sing-box 配置检查失败:\n%s", string(checkOutput))
-		return fmt.Errorf("sing-box 配置无效: %s", string(checkOutput))
+	if err := s.checkConfigLocked(); err != nil {
+		return err
 	}
 
 	if err := s.ensurePortsAvailable(); err != nil {

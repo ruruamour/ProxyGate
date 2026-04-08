@@ -312,6 +312,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/custom/status", s.readOnlyMiddleware(s.apiCustomStatus))
 	mux.HandleFunc("/api/subscription/contribute", s.apiSubscriptionContribute) // 访客可用
 	mux.HandleFunc("/api/subscription/add", s.authMiddleware(s.apiSubscriptionAdd))
+	mux.HandleFunc("/api/subscription/group", s.authMiddleware(s.apiSubscriptionGroup))
 	mux.HandleFunc("/api/subscription/delete", s.authMiddleware(s.apiSubscriptionDelete))
 	mux.HandleFunc("/api/subscription/refresh", s.authMiddleware(s.apiSubscriptionRefresh))
 	mux.HandleFunc("/api/subscription/refresh-all", s.authMiddleware(s.apiSubscriptionRefreshAll))
@@ -916,7 +917,7 @@ func (s *Server) apiSubscriptionContribute(w http.ResponseWriter, r *http.Reques
 		id, err = s.storage.AddContributedSubscription(req.Name, req.URL, refreshMin)
 	} else {
 		// 文件上传的贡献，用 AddSubscription + contributed 标记
-		id, err = s.storage.AddSubscription(req.Name, "", filePath, "auto", refreshMin)
+		id, err = s.storage.AddSubscription(req.Name, "", "", filePath, "auto", refreshMin)
 		if err == nil {
 			// 标记为贡献
 			s.storage.GetDB().Exec(`UPDATE subscriptions SET contributed = 1 WHERE id = ?`, id)
@@ -951,6 +952,7 @@ func (s *Server) apiSubscriptionAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		Name        string `json:"name"`
+		GroupName   string `json:"group_name"`
 		URL         string `json:"url"`
 		FileContent string `json:"file_content"` // 上传的文件内容（Base64 编码）
 		RefreshMin  int    `json:"refresh_min"`
@@ -1001,7 +1003,7 @@ func (s *Server) apiSubscriptionAdd(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[webui] 订阅验证通过: %s (%d 个节点)", req.Name, nodeCount)
 	}
 
-	id, err := s.storage.AddSubscription(req.Name, req.URL, filePath, "auto", req.RefreshMin)
+	id, err := s.storage.AddSubscription(req.Name, req.GroupName, req.URL, filePath, "auto", req.RefreshMin)
 	if err != nil {
 		if filePath != "" {
 			_ = os.Remove(filePath)
@@ -1021,6 +1023,26 @@ func (s *Server) apiSubscriptionAdd(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[webui] 添加订阅: %s (url=%v file=%v)", req.Name, req.URL != "", filePath != "")
 	jsonOK(w, map[string]interface{}{"status": "added", "id": id})
+}
+
+func (s *Server) apiSubscriptionGroup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ID        int64  `json:"id"`
+		GroupName string `json:"group_name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID <= 0 {
+		jsonError(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if err := s.storage.SetSubscriptionGroup(req.ID, req.GroupName); err != nil {
+		jsonError(w, "update group error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "group updated"})
 }
 
 // apiSubscriptionDelete 删除订阅

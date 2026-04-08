@@ -462,16 +462,21 @@ func (m *Manager) applyPreparedSubscriptionLocked(plan *preparedSubscription, re
 
 	if reloadOK {
 		portMap := m.singbox.GetPortMap()
+		insertedTunnelNodes := 0
 		for _, node := range tunnelNodes {
 			key := node.NodeKey()
 			if port, ok := portMap[key]; ok {
 				addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 				m.storage.AddProxyWithSource(addr, "socks5", "custom", sub.ID)
 				allProxies = append(allProxies, storage.Proxy{Address: addr, Protocol: "socks5", Source: "custom"})
+				insertedTunnelNodes++
 			}
 		}
-		if len(tunnelNodes) > 0 {
-			log.Printf("[custom] 📥 %d 个加密节点通过 sing-box 转换入池", len(tunnelNodes))
+		if insertedTunnelNodes > 0 {
+			log.Printf("[custom] 📥 %d 个加密节点通过 sing-box 转换入池", insertedTunnelNodes)
+		}
+		if skipped := len(tunnelNodes) - insertedTunnelNodes; skipped > 0 {
+			log.Printf("[custom] ⚠️ %d 个加密节点未入池（sing-box 当前能力不支持或未生成本地映射）", skipped)
 		}
 	} else if len(tunnelNodes) > 0 {
 		log.Printf("[custom] ⚠️ 订阅 [%s] 的 %d 个隧道节点本轮未入池（sing-box 未就绪）", sub.Name, len(tunnelNodes))
@@ -722,6 +727,10 @@ func (m *Manager) fetchURLWithClient(urlStr string, client *http.Client) ([]byte
 	if transport, ok := client.Transport.(*http.Transport); ok && transport != nil {
 		defer transport.CloseIdleConnections()
 	}
+
+	var bestBody []byte
+	bestUA := ""
+	bestNodeCount := -1
 	var lastErr error
 	for _, ua := range subscriptionUserAgents {
 		req, err := http.NewRequest("GET", urlStr, nil)
@@ -751,10 +760,24 @@ func (m *Manager) fetchURLWithClient(urlStr string, client *http.Client) ([]byte
 			continue
 		}
 
-		if ua != subscriptionUserAgents[0] {
-			log.Printf("[custom] 订阅 URL 使用备用 User-Agent 成功: %s", ua)
+		nodeCount := 0
+		if nodes, parseErr := Parse(body, "auto"); parseErr == nil {
+			nodeCount = len(nodes)
 		}
-		return body, nil
+		if nodeCount > bestNodeCount {
+			bestBody = body
+			bestUA = ua
+			bestNodeCount = nodeCount
+		}
+	}
+
+	if bestBody != nil {
+		if bestUA != subscriptionUserAgents[0] {
+			log.Printf("[custom] 订阅 URL 使用备用 User-Agent 成功: %s（解析 %d 个节点）", bestUA, bestNodeCount)
+		} else if bestNodeCount > 0 {
+			log.Printf("[custom] 订阅 URL 使用 User-Agent %s，解析 %d 个节点", bestUA, bestNodeCount)
+		}
+		return bestBody, nil
 	}
 
 	if lastErr != nil && errors.Is(lastErr, context.DeadlineExceeded) {

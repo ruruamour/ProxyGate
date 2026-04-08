@@ -2,6 +2,8 @@ package custom
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -27,7 +29,7 @@ func TestDeleteSubscriptionRemovesUploadedFile(t *testing.T) {
 	cfg := config.DefaultConfig()
 	manager := NewManager(store, nil, cfg)
 
-	subID, err := store.AddSubscription("upload", "", filePath, "auto", 60)
+	subID, err := store.AddSubscription("upload", "", "", filePath, "auto", 60)
 	if err != nil {
 		t.Fatalf("AddSubscription: %v", err)
 	}
@@ -51,5 +53,34 @@ func TestDeleteSubscriptionRemovesUploadedFile(t *testing.T) {
 		t.Fatalf("GetAllFiltered(custom): %v", err)
 	} else if len(proxies) != 0 {
 		t.Fatalf("custom proxies still exist after subscription delete: %d", len(proxies))
+	}
+}
+
+func TestFetchURLWithClientPrefersResponseWithMoreNodes(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Header.Get("User-Agent") {
+		case "v2rayN":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("trojan://single@example.com:443#single"))
+		default:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("trojan://one@example.com:443#one\nvless://11111111-1111-1111-1111-111111111111@example.com:443?encryption=none#two"))
+		}
+	}))
+	defer server.Close()
+
+	manager := &Manager{}
+	client := &http.Client{}
+	body, err := manager.fetchURLWithClient(server.URL, client)
+	if err != nil {
+		t.Fatalf("fetchURLWithClient() error = %v", err)
+	}
+
+	nodes, err := Parse(body, "auto")
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(nodes) != 2 {
+		t.Fatalf("node count = %d, want 2", len(nodes))
 	}
 }

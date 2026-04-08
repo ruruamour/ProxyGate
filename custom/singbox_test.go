@@ -134,3 +134,51 @@ func TestBuildOutboundSupportsAuthenticatedDirectProxies(t *testing.T) {
 		t.Fatalf("socks outbound password = %v, want secret", got)
 	}
 }
+
+func TestFallbackNodesForCheckErrorSkipsQUICNodes(t *testing.T) {
+	nodes := []ParsedNode{
+		{Name: "vless-node", Type: "vless"},
+		{Name: "hy2-node", Type: "hysteria2"},
+		{Name: "tuic-node", Type: "tuic"},
+		{Name: "trojan-node", Type: "trojan"},
+	}
+
+	filtered, skipped, retried := fallbackNodesForCheckError(nodes, &singBoxConfigCheckError{
+		Output: "FATAL initialize outbound[1]: QUIC is not included in this build, rebuild with -tags with_quic",
+	})
+	if !retried {
+		t.Fatal("expected QUIC fallback to trigger")
+	}
+	if len(filtered) != 2 {
+		t.Fatalf("filtered node count = %d, want 2", len(filtered))
+	}
+	if filtered[0].Type != "vless" || filtered[1].Type != "trojan" {
+		t.Fatalf("unexpected filtered nodes: %+v", filtered)
+	}
+	if len(skipped) != 2 {
+		t.Fatalf("skipped node count = %d, want 2", len(skipped))
+	}
+	if skipped[0].Type != "hysteria2" || skipped[1].Type != "tuic" {
+		t.Fatalf("unexpected skipped nodes: %+v", skipped)
+	}
+}
+
+func TestFallbackNodesForCheckErrorKeepsNodesForOtherFailures(t *testing.T) {
+	nodes := []ParsedNode{
+		{Name: "vmess-node", Type: "vmess"},
+		{Name: "tuic-node", Type: "tuic"},
+	}
+
+	filtered, skipped, retried := fallbackNodesForCheckError(nodes, &singBoxConfigCheckError{
+		Output: "FATAL parse config: invalid tls setting",
+	})
+	if retried {
+		t.Fatal("unexpected fallback for non-QUIC failure")
+	}
+	if len(skipped) != 0 {
+		t.Fatalf("skipped node count = %d, want 0", len(skipped))
+	}
+	if len(filtered) != len(nodes) {
+		t.Fatalf("filtered node count = %d, want %d", len(filtered), len(nodes))
+	}
+}
