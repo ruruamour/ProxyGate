@@ -128,6 +128,96 @@ func TestSelectProxyKeepsStickyAcrossSourcePriority(t *testing.T) {
 	}
 }
 
+func TestSelectProxyUsesUnifiedPoolInMixedMode(t *testing.T) {
+	store, err := storage.New(":memory:")
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+	defer store.Close()
+
+	proxies := []storage.Proxy{
+		{Address: "198.51.100.10:8080", Protocol: "http", ExitLocation: "US Chicago", Latency: 20, Source: "free"},
+		{Address: "127.0.0.1:20001", Protocol: "socks5", ExitLocation: "US Los Angeles", Latency: 80, Source: "custom"},
+	}
+	for _, p := range proxies {
+		if err := store.AddProxyWithSource(p.Address, p.Protocol, p.Source); err != nil {
+			t.Fatalf("AddProxyWithSource: %v", err)
+		}
+		if err := store.EnableProxy(p.Address); err != nil {
+			t.Fatalf("EnableProxy: %v", err)
+		}
+		if err := store.UpdateExitInfo(p.Address, p.Address, p.ExitLocation, p.Latency); err != nil {
+			t.Fatalf("UpdateExitInfo: %v", err)
+		}
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.CustomProxyMode = "mixed"
+	cfg.CustomPriority = true
+	cfg.CustomFreePriority = false
+
+	server := &Server{
+		storage:          store,
+		cfg:              cfg,
+		sessions:         NewSessionManager(),
+		sessionNamespace: "http-random",
+		mode:             "random",
+	}
+
+	selected, err := server.selectProxy(nil, true, RequestOptions{Region: "US"})
+	if err != nil {
+		t.Fatalf("selectProxy: %v", err)
+	}
+	if selected.Address != proxies[0].Address {
+		t.Fatalf("expected lowest-latency proxy %s from unified pool, got %s", proxies[0].Address, selected.Address)
+	}
+}
+
+func TestSOCKS5SelectProxyUsesUnifiedPoolInMixedMode(t *testing.T) {
+	store, err := storage.New(":memory:")
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+	defer store.Close()
+
+	proxies := []storage.Proxy{
+		{Address: "198.51.100.10:8080", Protocol: "http", ExitLocation: "US Chicago", Latency: 20, Source: "free"},
+		{Address: "127.0.0.1:20001", Protocol: "socks5", ExitLocation: "US Los Angeles", Latency: 80, Source: "custom"},
+	}
+	for _, p := range proxies {
+		if err := store.AddProxyWithSource(p.Address, p.Protocol, p.Source); err != nil {
+			t.Fatalf("AddProxyWithSource: %v", err)
+		}
+		if err := store.EnableProxy(p.Address); err != nil {
+			t.Fatalf("EnableProxy: %v", err)
+		}
+		if err := store.UpdateExitInfo(p.Address, p.Address, p.ExitLocation, p.Latency); err != nil {
+			t.Fatalf("UpdateExitInfo: %v", err)
+		}
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.CustomProxyMode = "mixed"
+	cfg.CustomPriority = true
+	cfg.CustomFreePriority = false
+
+	server := &SOCKS5Server{
+		storage:          store,
+		cfg:              cfg,
+		sessions:         NewSessionManager(),
+		sessionNamespace: "socks5-random",
+		mode:             "lowest-latency",
+	}
+
+	selected, err := server.selectSOCKS5Proxy(nil, RequestOptions{Region: "US"})
+	if err != nil {
+		t.Fatalf("selectSOCKS5Proxy: %v", err)
+	}
+	if selected.Address != proxies[0].Address {
+		t.Fatalf("expected lowest-latency proxy %s from unified pool, got %s", proxies[0].Address, selected.Address)
+	}
+}
+
 func TestSessionManagerReleasesPerKeyLocks(t *testing.T) {
 	sessions := NewSessionManager()
 

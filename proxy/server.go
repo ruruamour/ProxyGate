@@ -188,24 +188,13 @@ func (s *Server) selectProxy(tried []string, lowestLatency bool, opts RequestOpt
 	if sticky := selectExistingStickyProxy(s.storage, s.sessions, "", tried, opts); sticky != nil {
 		return sticky, nil
 	}
-	sourceFilter := sourceFilterFromMode(cfg.CustomProxyMode)
 
-	// 混用 + 优先模式：先尝试优先源，无可用则 fallback 全部
-	if cfg.CustomProxyMode == "mixed" && (cfg.CustomPriority || cfg.CustomFreePriority) {
-		preferSource := "custom"
-		if cfg.CustomFreePriority {
-			preferSource = "free"
-		}
-		var p *storage.Proxy
-		var err error
-		p, err = selectFromPool(s.storage, s.sessions, preferSource, s.sessionNamespace, "", tried, lowestLatency, opts)
-		if err == nil {
-			return p, nil
-		}
-		// fallback 到全部
+	// "mixed" 模式下直接从统一候选池选择，允许 HTTP/SOCKS5 与 free/custom 真正混合。
+	if cfg.CustomProxyMode == "mixed" {
 		return selectFromPool(s.storage, s.sessions, "", s.sessionNamespace, "", tried, lowestLatency, opts)
 	}
 
+	sourceFilter := sourceFilterFromMode(cfg.CustomProxyMode)
 	return selectFromPool(s.storage, s.sessions, sourceFilter, s.sessionNamespace, "", tried, lowestLatency, opts)
 }
 

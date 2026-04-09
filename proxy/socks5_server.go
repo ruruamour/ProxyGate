@@ -187,28 +187,20 @@ func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 // selectSOCKS5Proxy 根据使用模式选择 SOCKS5 上游代理
 func (s *SOCKS5Server) selectSOCKS5Proxy(tried []string, opts RequestOptions) (*storage.Proxy, error) {
 	cfg := s.currentConfig()
-	if sticky := selectExistingStickyProxy(s.storage, s.sessions, "socks5", tried, opts); sticky != nil {
+	protocolFilter := "socks5"
+	if cfg.CustomProxyMode == "mixed" {
+		protocolFilter = ""
+	}
+	if sticky := selectExistingStickyProxy(s.storage, s.sessions, protocolFilter, tried, opts); sticky != nil {
 		return sticky, nil
 	}
-	sourceFilter := sourceFilterFromMode(cfg.CustomProxyMode)
 
-	// 混用 + 优先模式
-	if cfg.CustomProxyMode == "mixed" && (cfg.CustomPriority || cfg.CustomFreePriority) {
-		preferSource := "custom"
-		if cfg.CustomFreePriority {
-			preferSource = "free"
-		}
-		var p *storage.Proxy
-		var err error
-		p, err = selectFromPool(s.storage, s.sessions, preferSource, s.sessionNamespace, "socks5", tried, s.mode == "lowest-latency", opts)
-		if err == nil {
-			return p, nil
-		}
-		// fallback
-		return selectFromPool(s.storage, s.sessions, "", s.sessionNamespace, "socks5", tried, s.mode == "lowest-latency", opts)
+	if cfg.CustomProxyMode == "mixed" {
+		return selectFromPool(s.storage, s.sessions, "", s.sessionNamespace, protocolFilter, tried, s.mode == "lowest-latency", opts)
 	}
 
-	return selectFromPool(s.storage, s.sessions, sourceFilter, s.sessionNamespace, "socks5", tried, s.mode == "lowest-latency", opts)
+	sourceFilter := sourceFilterFromMode(cfg.CustomProxyMode)
+	return selectFromPool(s.storage, s.sessions, sourceFilter, s.sessionNamespace, protocolFilter, tried, s.mode == "lowest-latency", opts)
 }
 
 // socks5Handshake 处理 SOCKS5 握手
