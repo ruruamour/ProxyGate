@@ -757,7 +757,7 @@ tr:hover{background:rgba(45,106,79,0.03)}
           <div class="health-status" id="pool-status-dot"></div>
         </div>
         <div class="health-card">
-          <div class="health-label" data-i18n="health.total">免费代理</div>
+          <div class="health-label" data-i18n="health.free_proxies">免费代理</div>
           <div class="health-value" id="stat-total">0</div>
           <div class="health-meta"><span id="stat-capacity">0</span> <span data-i18n="health.capacity">容量</span></div>
         </div>
@@ -1054,7 +1054,7 @@ const i18n = {
     'nav.login': '登录',
     'nav.logout': '退出',
     'health.status': '池子状态',
-    'health.total': '总代理数',
+    'health.total': '免费代理',
     'health.capacity': '容量',
     'health.slots': '槽位',
     'health.avg': '平均',
@@ -1082,7 +1082,7 @@ const i18n = {
     'proxy.th_exit_ip': '出口IP',
     'proxy.th_location': '位置',
     'proxy.th_latency': '延迟',
-    'proxy.th_usage': '使用统计',
+    'proxy.th_usage': '历史使用',
     'proxy.th_action': '操作',
     'proxy.btn_delete': '删除',
     'proxy.btn_refresh': '刷新',
@@ -1159,6 +1159,7 @@ const i18n = {
     'health.awaiting_probe': '等待探测唤醒',
     'health.no_disabled': '无禁用节点',
     'health.singbox_running': 'sing-box 运行中',
+    'health.singbox_stopped': 'sing-box 未运行',
     'health.ready': '就绪',
     'health.not_added': '未添加',
     'health.total_nodes': '共 {0} 节点',
@@ -1212,7 +1213,7 @@ const i18n = {
     'nav.login': 'Login',
     'nav.logout': 'Logout',
     'health.status': 'Pool Status',
-    'health.total': 'Total Proxies',
+    'health.total': 'Free Proxies',
     'health.capacity': 'capacity',
     'health.slots': 'slots',
     'health.avg': 'avg',
@@ -1240,7 +1241,7 @@ const i18n = {
     'proxy.th_exit_ip': 'Exit IP',
     'proxy.th_location': 'Location',
     'proxy.th_latency': 'Latency',
-    'proxy.th_usage': 'Usage',
+    'proxy.th_usage': 'Historical Usage',
     'proxy.th_action': 'Action',
     'proxy.btn_delete': 'DEL',
     'proxy.btn_refresh': 'Refresh',
@@ -1315,6 +1316,7 @@ const i18n = {
     'health.awaiting_probe': 'Awaiting probe',
     'health.no_disabled': 'No disabled nodes',
     'health.singbox_running': 'sing-box running',
+    'health.singbox_stopped': 'sing-box stopped',
     'health.ready': 'Ready',
     'health.not_added': 'None',
     'health.total_nodes': '{0} total nodes',
@@ -1502,8 +1504,7 @@ async function loadPoolStatus() {
   const status = await api('/api/pool/status');
   if (!status) return;
 
-  const freeTotal = status.Total - (status.CustomCount || 0);
-  document.getElementById('stat-total').textContent = freeTotal;
+  document.getElementById('stat-total').textContent = status.Total;
   document.getElementById('stat-capacity').textContent = status.HTTPSlots + status.SOCKS5Slots;
   document.getElementById('stat-http').textContent = status.HTTP;
   document.getElementById('stat-socks5').textContent = status.SOCKS5;
@@ -1865,7 +1866,7 @@ async function loadSubscriptions() {
     const subCountEl = document.getElementById('stat-sub-count');
     const subMetaEl = document.getElementById('stat-sub-meta');
     if (subCountEl) subCountEl.textContent = subCount;
-    if (subMetaEl) subMetaEl.textContent = status.singbox_running ? t('health.singbox_running') : (subCount > 0 ? t('health.ready') : t('health.not_added'));
+    if (subMetaEl) subMetaEl.textContent = status.singbox_running ? t('health.singbox_running') : (subCount > 0 ? t('health.singbox_stopped') : t('health.not_added'));
 
     const customEl = document.getElementById('stat-custom');
     const customMeta = document.getElementById('custom-meta');

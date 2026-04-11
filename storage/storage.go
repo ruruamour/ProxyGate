@@ -894,17 +894,55 @@ func (s *Storage) MarkAsReplacementCandidate(addresses []string) error {
 	return err
 }
 
-// GetAverageLatency 获取指定协议的平均延迟
-func (s *Storage) GetAverageLatency(protocol string) (int, error) {
+func (s *Storage) countEligible(source, protocol string) (int, error) {
+	var query strings.Builder
+	query.WriteString(`SELECT COUNT(*) FROM proxies WHERE status IN ('active', 'degraded') AND fail_count < 3`)
+	args := make([]interface{}, 0, 2)
+
+	if source != "" {
+		query.WriteString(` AND source = ?`)
+		args = append(args, source)
+	}
+	if protocol != "" {
+		query.WriteString(` AND protocol = ?`)
+		args = append(args, protocol)
+	}
+
+	var count int
+	err := s.db.QueryRow(query.String(), args...).Scan(&count)
+	return count, err
+}
+
+func (s *Storage) averageEligibleLatency(source, protocol string) (int, error) {
+	var query strings.Builder
+	query.WriteString(`SELECT AVG(latency) FROM proxies WHERE status IN ('active', 'degraded') AND fail_count < 3 AND latency > 0`)
+	args := make([]interface{}, 0, 2)
+
+	if source != "" {
+		query.WriteString(` AND source = ?`)
+		args = append(args, source)
+	}
+	if protocol != "" {
+		query.WriteString(` AND protocol = ?`)
+		args = append(args, protocol)
+	}
+
 	var avg sql.NullFloat64
-	err := s.db.QueryRow(
-		`SELECT AVG(latency) FROM proxies WHERE protocol = ? AND status = 'active' AND latency > 0`,
-		protocol,
-	).Scan(&avg)
+	err := s.db.QueryRow(query.String(), args...).Scan(&avg)
 	if err != nil || !avg.Valid {
 		return 0, err
 	}
 	return int(avg.Float64), nil
+}
+
+// GetAverageLatency 获取指定协议的平均延迟（全部来源）。
+func (s *Storage) GetAverageLatency(protocol string) (int, error) {
+	return s.averageEligibleLatency("", protocol)
+}
+
+// GetAverageLatencyBySource 获取指定来源+协议的平均延迟。
+func (s *Storage) GetAverageLatencyBySource(protocol, source string) (int, error) {
+	return s.averageEligibleLatency(source, protocol)
 }
 
 // GetQualityDistribution 获取质量分布统计
@@ -1142,40 +1180,22 @@ func (s *Storage) DisableNotAllowedCountries(allowedCodes []string) (int64, erro
 
 // Count 返回可用代理数量（仅免费代理，用于 slot 计算）
 func (s *Storage) Count() (int, error) {
-	var count int
-	err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM proxies WHERE status IN ('active', 'degraded') AND fail_count < 3 AND source = 'free'`,
-	).Scan(&count)
-	return count, err
+	return s.countEligible("free", "")
 }
 
 // CountAll 返回所有可用代理数量（免费+订阅）
 func (s *Storage) CountAll() (int, error) {
-	var count int
-	err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM proxies WHERE status IN ('active', 'degraded') AND fail_count < 3`,
-	).Scan(&count)
-	return count, err
+	return s.countEligible("", "")
 }
 
 // CountByProtocol 按协议统计数量（仅免费代理，用于 slot 计算）
 func (s *Storage) CountByProtocol(protocol string) (int, error) {
-	var count int
-	err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM proxies WHERE status IN ('active', 'degraded') AND fail_count < 3 AND source = 'free' AND protocol = ?`,
-		protocol,
-	).Scan(&count)
-	return count, err
+	return s.countEligible("free", protocol)
 }
 
 // CountByProtocolAll 按协议统计所有可用代理数量（免费+订阅）。
 func (s *Storage) CountByProtocolAll(protocol string) (int, error) {
-	var count int
-	err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM proxies WHERE status IN ('active', 'degraded') AND fail_count < 3 AND protocol = ?`,
-		protocol,
-	).Scan(&count)
-	return count, err
+	return s.countEligible("", protocol)
 }
 
 // IncrementFailCount 增加失败次数
@@ -1311,12 +1331,7 @@ func (s *Storage) GetDisabledCustomProxies() ([]Proxy, error) {
 
 // CountBySource 按来源统计可用代理数量
 func (s *Storage) CountBySource(source string) (int, error) {
-	var count int
-	err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM proxies WHERE source = ? AND status IN ('active', 'degraded') AND fail_count < 3`,
-		source,
-	).Scan(&count)
-	return count, err
+	return s.countEligible(source, "")
 }
 
 // DeleteBySource 删除指定来源的所有代理

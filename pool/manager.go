@@ -37,26 +37,21 @@ type PoolStatus struct {
 	State            string // healthy/warning/critical/emergency
 	AvgLatencyHTTP   int
 	AvgLatencySocks5 int
-	CustomCount      int // 订阅代理数量
+	CustomCount      int // 可用订阅代理数量（单独展示，不计入免费池）
 }
 
 // GetStatus 获取当前池子状态
 func (m *Manager) GetStatus() (*PoolStatus, error) {
-	cfg := m.currentConfig()
 	total, _ := m.storage.Count()
 	httpCount, _ := m.storage.CountByProtocol("http")
 	socks5Count, _ := m.storage.CountByProtocol("socks5")
-	if cfg.CustomProxyMode != "free_only" {
-		total, _ = m.storage.CountAll()
-		httpCount, _ = m.storage.CountByProtocolAll("http")
-		socks5Count, _ = m.storage.CountByProtocolAll("socks5")
-	}
+	cfg := m.currentConfig()
 
 	httpSlots, socks5Slots := cfg.CalculateSlots()
 
-	// 计算平均延迟
-	avgHTTP, _ := m.storage.GetAverageLatency("http")
-	avgSOCKS5, _ := m.storage.GetAverageLatency("socks5")
+	// 平均延迟与数量保持同一免费池口径，避免前端卡片混入订阅代理。
+	avgHTTP, _ := m.storage.GetAverageLatencyBySource("http", "free")
+	avgSOCKS5, _ := m.storage.GetAverageLatencyBySource("socks5", "free")
 
 	// 判断状态
 	state := m.determineState(total, httpCount, socks5Count)
